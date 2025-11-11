@@ -1,0 +1,212 @@
+:root {
+    color-scheme: light dark;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+}
+
+body {
+    margin: 0;
+    padding: 2rem;
+    min-height: 100vh;
+    background: #f7f7f7;
+    color: #222;
+}
+
+header {
+    margin-bottom: 2rem;
+    max-width: 960px;
+}
+
+h1 {
+    margin: 0 0 0.5rem;
+    font-size: 2rem;
+}
+
+h2 {
+    margin-top: 0;
+}
+
+.panel {
+    margin-bottom: 2rem;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 6%);
+    padding: 1.5rem;
+    max-width: 960px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.5rem;
+}
+
+th,
+td {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+th {
+    background: #fafafa;
+    font-weight: 600;
+}
+
+tr:last-child td {
+    border-bottom: none;
+}
+
+.controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: center;
+}
+
+button,
+select {
+    font: inherit;
+    padding: 0.6rem 1rem;
+    border-radius: 6px;
+    border: 1px solid #c7c7c7;
+    background: #fff;
+    color: #111;
+    cursor: pointer;
+}
+
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.65;
+}
+
+button.primary {
+    background: #2563eb;
+    border-color: #1d4ed8;
+    color: #fff;
+}
+
+button.danger {
+    background: #dc2626;
+    border-color: #b91c1c;
+    color: #fff;
+}
+
+select {
+    min-width: 220px;
+}
+
+.state-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
+}
+
+.state-indicator span {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ef4444;
+}
+
+.state-indicator.on span {
+    background: #22c55e;
+}
+
+.pattern-display {
+    margin-top: 0.75rem;
+    font-size: 0.95rem;
+    color: #4b5563;
+}
+
+.log-panel {
+    margin-top: 1rem;
+}
+
+.log-panel > summary {
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.log-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    margin: 1rem 0;
+}
+
+.log-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+}
+
+.log-status {
+    min-height: 1.5rem;
+    font-size: 0.9rem;
+    color: #4b5563;
+}
+
+.log-status[data-state="error"] {
+    color: #dc2626;
+}
+
+.log-output {
+    background: #0f172a;
+    color: #f1f5f9;
+    padding: 1rem;
+    border-radius: 6px;
+    max-height: 320px;
+    overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+}
+
+.log-output[data-empty="true"] {
+    color: #94a3b8;
+    font-style: italic;
+}
+
+@media (prefers-color-scheme: dark) {
+    body {
+        background: #0f172a;
+        color: #e2e8f0;
+    }
+
+    .panel {
+        background: #1e293b;
+        box-shadow: 0 2px 8px rgb(15 23 42 / 40%);
+    }
+
+    th {
+        background: #1f2937;
+    }
+
+    td,
+    th {
+        border-color: #334155;
+    }
+
+    button,
+    select {
+        background: #1f2937;
+        border-color: #334155;
+        color: inherit;
+    }
+
+    .pattern-display {
+        color: #cbd5f5;
+    }
+
+    .log-output {
+        background: #020617;
+        color: #e2e8f0;
+    }
+}
+

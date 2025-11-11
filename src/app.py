@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import shutil
+import subprocess
+import time
 from dataclasses import dataclass
+from typing import Iterable, Iterator
 
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    stream_with_context,
+    url_for,
+)
 
 from .hardware import LightStripConfig, build_controller
 
@@ -106,6 +120,8 @@ def create_app() -> Flask:
         ("twinkle", "Twinkle"),
     ]
 
+    systemd_service_name = os.getenv("HOUSE_LIGHTS_SYSTEMD_SERVICE", "houselights")
+
     gpio_entries = _parse_config_list(os.getenv("HOUSE_LIGHTS_GPIO_PINS"))
     led_counts = _parse_led_counts(os.getenv("HOUSE_LIGHTS_PIN_LED_COUNTS"))
     strip_configs = _build_strip_configs(gpio_entries, led_counts)
@@ -117,6 +133,7 @@ def create_app() -> Flask:
         "is_on": False,
         "selected_pattern": patterns[0][0],
     }
+    app.config["SYSTEMD_SERVICE_NAME"] = systemd_service_name
 
     @app.get("/health")
     def health() -> tuple[dict[str, str], int]:
@@ -162,6 +179,107 @@ def create_app() -> Flask:
         light_state["selected_pattern"] = pattern_id
         if light_state["is_on"]:
             _apply_current_pattern()
+
+    def _build_journalctl_command(
+        *extra_args: str, follow: bool = False, since: str | None = None, tail: int | None = None
+    ) -> list[str]:
+        command = ["journalctl", "--unit", app.config["SYSTEMD_SERVICE_NAME"], "--no-pager"]
+        if since:
+            command.extend(["--since", since])
+        if tail is not None:
+            command.extend(["--lines", str(tail)])
+        if follow:
+            command.append("--follow")
+        command.extend(extra_args)
+        return command
+
+    def _journalctl_available() -> bool:
+        return shutil.which("journalctl") is not None
+
+    def _stream_journal_output(command: list[str]) -> Iterator[str]:
+        LOGGER.debug("Starting journalctl stream: command=%s", command)
+        with subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        ) as process:
+            assert process.stdout is not None  # for typing
+            try:
+                for line in process.stdout:
+                    yield line.rstrip("\n")
+            finally:
+                with contextlib.suppress(Exception):
+                    process.terminate()
+                with contextlib.suppress(Exception):
+                    process.kill()
+
+    @app.get("/api/logs/recent")
+    def recent_logs() -> Response:
+        """Return the most recent journalctl output for the service."""
+        if not _journalctl_available():
+            LOGGER.warning("journalctl not available on host; unable to fetch logs.")
+            return Response(
+                "journalctl not available on host system.",
+                status=503,
+                mimetype="text/plain",
+            )
+
+        command = _build_journalctl_command("--output", "short-iso", tail=200)
+        try:
+            completed = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            LOGGER.exception("Failed to read recent logs: command=%s", command)
+            message = exc.stderr or exc.stdout or "Failed to retrieve logs."
+            return Response(message, status=500, mimetype="text/plain")
+
+        payload = completed.stdout.strip() or "(no log entries)"
+        return Response(payload, mimetype="text/plain")
+
+    @app.get("/api/logs/live")
+    def live_logs() -> Response:
+        """Stream journald output as server-sent events for live log viewing."""
+
+        if not _journalctl_available():
+            LOGGER.warning("journalctl not available on host; unable to stream logs.")
+            return Response(
+                "journalctl not available on host system.",
+                status=503,
+                mimetype="text/plain",
+            )
+
+        command = _build_journalctl_command(
+            "--output",
+            "short-iso",
+            follow=True,
+            since="5 minutes ago",
+        )
+
+        def event_stream() -> Iterable[str]:
+            heartbeat_interval = 15.0
+            next_heartbeat = time.monotonic() + heartbeat_interval
+            try:
+                for line in _stream_journal_output(command):
+                    yield f"data: {line}\n\n"
+                    current_time = time.monotonic()
+                    if current_time >= next_heartbeat:
+                        next_heartbeat = current_time + heartbeat_interval
+                        yield ": keep-alive\n\n"
+                yield "event: stream-end\ndata: journalctl process exited\n\n"
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOGGER.exception("Error streaming logs: %s", exc)
+                yield f"event: error\ndata: {exc}\n\n"
+
+        response = Response(stream_with_context(event_stream()), mimetype="text/event-stream")
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["X-Accel-Buffering"] = "no"
+        return response
 
     @app.post("/lights/on")
     def turn_lights_on() -> str:

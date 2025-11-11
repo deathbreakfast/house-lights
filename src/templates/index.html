@@ -4,114 +4,7 @@
     <meta charset="utf-8" />
     <title>House Lights Control</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      :root {
-        color-scheme: light dark;
-        font-family: system-ui, -apple-system, Segoe UI, sans-serif;
-      }
-
-      body {
-        margin: 0;
-        padding: 2rem;
-        background: #f7f7f7;
-        color: #222;
-        min-height: 100vh;
-      }
-
-      h1 {
-        margin-top: 0;
-        font-size: 2rem;
-      }
-
-      section {
-        margin-bottom: 2rem;
-        background: #fff;
-        border-radius: 8px;
-        box-shadow: 0 2px 8px rgb(0 0 0 / 6%);
-        padding: 1.5rem;
-      }
-
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 0.5rem;
-      }
-
-      th,
-      td {
-        text-align: left;
-        padding: 0.5rem 0.75rem;
-        border-bottom: 1px solid #e0e0e0;
-      }
-
-      th {
-        background: #fafafa;
-        font-weight: 600;
-      }
-
-      tr:last-child td {
-        border-bottom: none;
-      }
-
-      .controls {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 1rem;
-        align-items: center;
-      }
-
-      button,
-      select {
-        font: inherit;
-        padding: 0.6rem 1rem;
-        border-radius: 6px;
-        border: 1px solid #c7c7c7;
-        background: #fff;
-        cursor: pointer;
-        color: #111;
-      }
-
-      button.primary {
-        background: #2563eb;
-        border-color: #1d4ed8;
-        color: #fff;
-      }
-
-      button.danger {
-        background: #dc2626;
-        border-color: #b91c1c;
-        color: #fff;
-      }
-
-      select {
-        min-width: 220px;
-      }
-
-      .state-indicator {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        font-weight: 600;
-      }
-
-      .state-indicator span {
-        display: inline-block;
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        background: #ef4444;
-      }
-
-      .state-indicator.on span {
-        background: #22c55e;
-      }
-
-      .pattern-display {
-        margin-top: 0.75rem;
-        font-size: 0.95rem;
-        color: #4b5563;
-      }
-    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
   </head>
   <body>
     <header>
@@ -122,7 +15,7 @@
       </p>
     </header>
 
-    <section>
+    <section class="panel">
       <h2>Power</h2>
       <div class="controls">
         <div class="state-indicator {{ 'on' if is_on else '' }}">
@@ -138,7 +31,7 @@
       </div>
     </section>
 
-    <section>
+    <section class="panel">
       <h2>Patterns</h2>
       <form class="controls" method="post" action="{{ url_for('select_pattern') }}">
         <label for="pattern">Select Pattern:</label>
@@ -156,7 +49,7 @@
       </p>
     </section>
 
-    <section>
+    <section class="panel">
       <h2>Configured GPIO Pins</h2>
       {% if gpio_entries %}
         <table>
@@ -180,7 +73,7 @@
       {% endif %}
     </section>
 
-    <section>
+    <section class="panel">
       <h2>Configured Light Ranges</h2>
       {% if light_range_entries %}
         <table>
@@ -203,6 +96,34 @@
         <p>No light ranges configured. Set the HOUSE_LIGHTS_LIGHT_RANGES environment variable.</p>
       {% endif %}
     </section>
+
+    <section class="panel">
+      <h2>Service Logs</h2>
+      <p>
+        Inspect recent output from the <code>{{ config.get('SYSTEMD_SERVICE_NAME') }}</code> systemd unit.
+        Use live tail mode while debugging, and close the panel to stop streaming.
+      </p>
+      <details class="log-panel" data-log-panel>
+        <summary>View houselights.service logs</summary>
+        <div class="log-controls" data-log-controls>
+          <button type="button" data-action="refresh">Refresh</button>
+          <button type="button" data-action="toggle-live" data-state="idle">Start live tail</button>
+          <label class="log-option">
+            <input type="checkbox" data-action="auto-scroll" checked />
+            Auto-scroll
+          </label>
+        </div>
+        <div class="log-status" data-log-status role="status" aria-live="polite"></div>
+        <pre
+          class="log-output"
+          data-log-output
+          data-empty="true"
+          aria-label="Recent houselights service logs"
+        ></pre>
+      </details>
+    </section>
+
+    <script type="module" src="{{ url_for('static', filename='js/logs.js') }}"></script>
   </body>
 </html>
 
