@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment variables
+.env
+.env.*
+
+# macOS / Linux artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Python tooling
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Coverage / reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Node / frontend (future-proofing)
+node_modules/
+dist/
+build/
+
+
