@@ -6,8 +6,15 @@ if (details) {
   const refreshButton = details.querySelector('[data-action="refresh"]');
   const liveButton = details.querySelector('[data-action="toggle-live"]');
   const autoScrollCheckbox = details.querySelector('[data-action="auto-scroll"]');
+  const STORAGE_KEY = "houselights.logPanelOpen";
+  const EMPTY_MESSAGE = "No log entries yet.";
 
   let eventSource = null;
+
+  const isEmptyPayload = (payload) => {
+    const trimmed = payload.trim();
+    return trimmed.length === 0 || trimmed === "-- No entries --";
+  };
 
   const setStatus = (message, state = "info") => {
     if (!statusEl) {
@@ -18,8 +25,15 @@ if (details) {
   };
 
   const markEmpty = (isEmpty) => {
-    if (logOutput) {
-      logOutput.dataset.empty = String(isEmpty);
+    if (!logOutput) {
+      return;
+    }
+
+    logOutput.dataset.empty = String(isEmpty);
+    if (isEmpty) {
+      logOutput.textContent = EMPTY_MESSAGE;
+    } else if (logOutput.textContent === EMPTY_MESSAGE) {
+      logOutput.textContent = "";
     }
   };
 
@@ -32,7 +46,6 @@ if (details) {
 
   const resetLogView = () => {
     if (logOutput) {
-      logOutput.textContent = "";
       markEmpty(true);
     }
   };
@@ -55,10 +68,15 @@ if (details) {
         throw new Error(payload || `Log request failed with status ${response.status}`);
       }
 
-      logOutput.textContent = payload;
-      markEmpty(payload.trim().length === 0);
+      if (isEmptyPayload(payload)) {
+        markEmpty(true);
+      } else {
+        markEmpty(false);
+        logOutput.textContent = payload;
+        scrollToBottom();
+      }
+
       setStatus(`Updated at ${new Date().toLocaleTimeString()}`);
-      scrollToBottom();
     } catch (error) {
       console.error("Failed to refresh logs", error);
       resetLogView();
@@ -91,11 +109,40 @@ if (details) {
     if (!line) {
       return;
     }
+    if (isEmptyPayload(line)) {
+      return;
+    }
+    if (logOutput.dataset.empty === "true") {
+      markEmpty(false);
+    }
+
     const needsLeadingNewline =
       logOutput.textContent.length > 0 && !logOutput.textContent.endsWith("\n");
     logOutput.textContent += (needsLeadingNewline ? "\n" : "") + line;
-    markEmpty(false);
     scrollToBottom();
+  };
+
+  const persistOpenState = () => {
+    try {
+      if (details.open) {
+        window.localStorage.setItem(STORAGE_KEY, "true");
+      } else {
+        window.localStorage.setItem(STORAGE_KEY, "false");
+      }
+    } catch (error) {
+      console.warn("Unable to persist log panel state", error);
+    }
+  };
+
+  const restoreOpenState = () => {
+    try {
+      const saved = window.localStorage.getItem(STORAGE_KEY);
+      if (saved === "true") {
+        details.open = true;
+      }
+    } catch (error) {
+      console.warn("Unable to restore log panel state", error);
+    }
   };
 
   const startLiveTail = () => {
@@ -140,6 +187,7 @@ if (details) {
     } else {
       stopLiveTail(false);
     }
+    persistOpenState();
   });
 
   refreshButton?.addEventListener("click", (event) => {
@@ -157,5 +205,38 @@ if (details) {
   });
 
   resetLogView();
+  restoreOpenState();
+  if (details.open) {
+    refreshLogs();
+  }
 }
+
+const SCROLL_STORAGE_KEY = "houselights.scrollPosition";
+
+const restoreScrollPosition = () => {
+  try {
+    const saved = window.sessionStorage.getItem(SCROLL_STORAGE_KEY);
+    if (!saved) {
+      return;
+    }
+    const y = Number.parseInt(saved, 10);
+    if (Number.isFinite(y)) {
+      window.scrollTo({ top: y });
+    }
+    window.sessionStorage.removeItem(SCROLL_STORAGE_KEY);
+  } catch (error) {
+    console.warn("Unable to restore scroll position", error);
+  }
+};
+
+const persistScrollPosition = () => {
+  try {
+    window.sessionStorage.setItem(SCROLL_STORAGE_KEY, String(window.scrollY));
+  } catch (error) {
+    console.warn("Unable to persist scroll position", error);
+  }
+};
+
+window.addEventListener("beforeunload", persistScrollPosition);
+restoreScrollPosition();
 

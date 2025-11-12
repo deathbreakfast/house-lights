@@ -5,11 +5,12 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import selectors
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Iterable, Iterator
+from typing import Iterable
 
 from flask import (
     Flask,
@@ -159,24 +160,30 @@ def create_app() -> Flask:
         controller = app.config["LIGHT_CONTROLLER"]
         light_state = app.config["LIGHT_STATE"]
         if light_state["is_on"]:
+            LOGGER.info("Applying pattern: %s", light_state["selected_pattern"])
             controller.apply_pattern(light_state["selected_pattern"])
 
     def _set_light_power(is_on: bool) -> None:
         """Update in-memory light power state and notify the controller."""
         light_state = app.config["LIGHT_STATE"]
         light_state["is_on"] = is_on
+        LOGGER.info("Lights %s", "ON" if is_on else "OFF")
         controller = app.config["LIGHT_CONTROLLER"]
         controller.set_power(is_on)
         if is_on:
             # Default to the all white pattern when powering on.
             if light_state["selected_pattern"] != "all_on_white":
                 light_state["selected_pattern"] = "all_on_white"
+                LOGGER.debug("Defaulting pattern to all_on_white while powering on.")
             _apply_current_pattern()
+        else:
+            LOGGER.debug("Lights powered off; skipping pattern application.")
 
     def _set_pattern(pattern_id: str) -> None:
         """Update the in-memory selected pattern and notify the controller."""
         light_state = app.config["LIGHT_STATE"]
         light_state["selected_pattern"] = pattern_id
+        LOGGER.info("Pattern selected: %s", pattern_id)
         if light_state["is_on"]:
             _apply_current_pattern()
 
@@ -196,25 +203,6 @@ def create_app() -> Flask:
     def _journalctl_available() -> bool:
         return shutil.which("journalctl") is not None
 
-    def _stream_journal_output(command: list[str]) -> Iterator[str]:
-        LOGGER.debug("Starting journalctl stream: command=%s", command)
-        with subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        ) as process:
-            assert process.stdout is not None  # for typing
-            try:
-                for line in process.stdout:
-                    yield line.rstrip("\n")
-            finally:
-                with contextlib.suppress(Exception):
-                    process.terminate()
-                with contextlib.suppress(Exception):
-                    process.kill()
-
     @app.get("/api/logs/recent")
     def recent_logs() -> Response:
         """Return the most recent journalctl output for the service."""
@@ -227,6 +215,7 @@ def create_app() -> Flask:
             )
 
         command = _build_journalctl_command("--output", "short-iso", tail=200)
+        LOGGER.info("Fetching recent logs with command: %s", command)
         try:
             completed = subprocess.run(
                 command,
@@ -234,12 +223,23 @@ def create_app() -> Flask:
                 capture_output=True,
                 text=True,
             )
+            LOGGER.debug(
+                "recent_logs subprocess completed: returncode=%s, stdout_bytes=%s, stderr_bytes=%s",
+                completed.returncode,
+                len(completed.stdout),
+                len(completed.stderr),
+            )
         except subprocess.CalledProcessError as exc:
             LOGGER.exception("Failed to read recent logs: command=%s", command)
             message = exc.stderr or exc.stdout or "Failed to retrieve logs."
             return Response(message, status=500, mimetype="text/plain")
 
-        payload = completed.stdout.strip() or "(no log entries)"
+        payload = completed.stdout.strip()
+        if payload:
+            LOGGER.info("recent_logs returning %s characters.", len(payload))
+            LOGGER.debug("recent_logs payload:\n%s", payload)
+        else:
+            LOGGER.warning("recent_logs fetched no output.")
         return Response(payload, mimetype="text/plain")
 
     @app.get("/api/logs/live")
@@ -263,18 +263,61 @@ def create_app() -> Flask:
 
         def event_stream() -> Iterable[str]:
             heartbeat_interval = 15.0
-            next_heartbeat = time.monotonic() + heartbeat_interval
+            LOGGER.debug("Opening journalctl live stream: command=%s", command)
             try:
-                for line in _stream_journal_output(command):
-                    yield f"data: {line}\n\n"
-                    current_time = time.monotonic()
-                    if current_time >= next_heartbeat:
-                        next_heartbeat = current_time + heartbeat_interval
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+            except OSError as exc:  # pragma: no cover - defensive logging
+                LOGGER.exception("Failed to spawn journalctl for live logs.")
+                yield f"event: error\ndata: {exc}\n\n"
+                return
+
+            assert process.stdout is not None  # for typing
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
+
+            try:
+                next_heartbeat = time.monotonic() + heartbeat_interval
+                while True:
+                    timeout = max(0.0, next_heartbeat - time.monotonic())
+                    events = selector.select(timeout)
+                    if events:
+                        line = process.stdout.readline()
+                        if not line:
+                            LOGGER.debug("journalctl stream ended.")
+                            yield "event: stream-end\ndata: journalctl process exited\n\n"
+                            break
+                        clean_line = line.rstrip()
+                        LOGGER.debug("live_logs emitting line: %s", clean_line)
+                        yield f"data: {clean_line}\n\n"
+                        next_heartbeat = time.monotonic() + heartbeat_interval
+                    else:
+                        LOGGER.debug("live_logs emitting keep-alive event.")
                         yield ": keep-alive\n\n"
-                yield "event: stream-end\ndata: journalctl process exited\n\n"
+                        next_heartbeat = time.monotonic() + heartbeat_interval
             except Exception as exc:  # pragma: no cover - defensive logging
                 LOGGER.exception("Error streaming logs: %s", exc)
                 yield f"event: error\ndata: {exc}\n\n"
+            finally:
+                with contextlib.suppress(Exception):
+                    selector.unregister(process.stdout)
+                selector.close()
+                with contextlib.suppress(Exception):
+                    process.stdout.close()
+                with contextlib.suppress(Exception):
+                    process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(Exception):
+                        process.kill()
+                    with contextlib.suppress(Exception):
+                        process.wait(timeout=1)
 
         response = Response(stream_with_context(event_stream()), mimetype="text/event-stream")
         response.headers["Cache-Control"] = "no-cache"
@@ -284,12 +327,14 @@ def create_app() -> Flask:
     @app.post("/lights/on")
     def turn_lights_on() -> str:
         """Handle a request to turn the lights on."""
+        LOGGER.info("Received request to turn lights on.")
         _set_light_power(True)
         return redirect(url_for("index"))
 
     @app.post("/lights/off")
     def turn_lights_off() -> str:
         """Handle a request to turn the lights off."""
+        LOGGER.info("Received request to turn lights off.")
         _set_light_power(False)
         return redirect(url_for("index"))
 
@@ -302,6 +347,7 @@ def create_app() -> Flask:
             LOGGER.warning("Received invalid pattern selection: %s", pattern_id)
             return redirect(url_for("index"))
 
+        LOGGER.info("Received request to apply pattern: %s", pattern_id)
         _set_pattern(pattern_id)
         return redirect(url_for("index"))
 
