@@ -117,14 +117,25 @@ def create_app() -> Flask:
 
     app = Flask(__name__, template_folder="templates")
 
-    log_file_path = os.getenv("HOUSE_LIGHTS_LOG_FILE", "/var/log/houselights/app.log")
+    env_log_file = os.getenv("HOUSE_LIGHTS_LOG_FILE")
+    candidate_paths: list[Path] = []
+    if env_log_file:
+        candidate_paths.append(Path(env_log_file).expanduser())
+    else:
+        candidate_paths.append(Path("/var/log/houselights/app.log"))
+    candidate_paths.append(Path.home() / ".houselights" / "logs" / "app.log")
+
+    app.config["LOG_FILE_CANDIDATES"] = candidate_paths.copy()
+
     log_path_obj: Path | None = None
-    if log_file_path:
+    for candidate in candidate_paths:
         try:
-            log_path_obj = Path(log_file_path).expanduser()
-            log_path_obj.parent.mkdir(parents=True, exist_ok=True)
+            candidate.parent.mkdir(parents=True, exist_ok=True)
             rotating_handler = logging.handlers.RotatingFileHandler(
-                log_path_obj, maxBytes=5 * 1_024 * 1_024, backupCount=5
+                candidate,
+                maxBytes=int(os.getenv("HOUSE_LIGHTS_LOG_MAX_BYTES", 5 * 1_024 * 1_024)),
+                backupCount=int(os.getenv("HOUSE_LIGHTS_LOG_BACKUP_COUNT", 5)),
+                encoding="utf-8",
             )
             rotating_handler.setFormatter(
                 logging.Formatter(
@@ -134,10 +145,19 @@ def create_app() -> Flask:
             )
             rotating_handler.setLevel(logging.INFO)
             logging.getLogger().addHandler(rotating_handler)
-            LOGGER.info("File logging enabled at %s", log_path_obj)
+            LOGGER.info("File logging enabled at %s", candidate)
+            log_path_obj = candidate
+            break
+        except PermissionError:
+            LOGGER.warning(
+                "Insufficient permissions for log file path %s; attempting fallback.", candidate
+            )
         except Exception:  # pragma: no cover - defensive logging
-            LOGGER.exception("Failed to initialize file logging handler.")
-            log_path_obj = None
+            LOGGER.exception("Failed to initialize file logging handler at %s.", candidate)
+
+    if log_path_obj is None:
+        LOGGER.error("File logging disabled; no writable log file path available.")
+
     app.config["LOG_FILE_PATH"] = log_path_obj
 
     patterns: list[tuple[str, str]] = [
@@ -283,11 +303,14 @@ def create_app() -> Flask:
                 len(completed.stderr),
             )
             payload = completed.stdout.strip()
-            if payload:
+            if payload and payload != "-- No entries --":
                 LOGGER.info("recent_logs returning %s characters.", len(payload))
                 LOGGER.debug("recent_logs payload:\n%s", payload)
                 return _build_log_response(payload, source="journalctl")
-            LOGGER.warning("recent_logs fetched no output; attempting file fallback.")
+            LOGGER.warning(
+                "recent_logs received empty journal output%s; attempting file fallback.",
+                " (-- No entries --)" if payload == "-- No entries --" else "",
+            )
         except subprocess.CalledProcessError as exc:
             LOGGER.exception("Failed to read recent logs: command=%s", command)
             message = exc.stderr or exc.stdout or "Failed to retrieve logs."
@@ -297,8 +320,13 @@ def create_app() -> Flask:
 
         fallback_payload = _read_recent_file_logs()
         if fallback_payload is None:
+            candidate_hint = ", ".join(str(path) for path in app.config.get("LOG_FILE_CANDIDATES", []))
             return Response(
-                "Log data unavailable: journalctl failed and file fallback missing.",
+                (
+                    "Log data unavailable: journalctl failed and no readable log file was found. "
+                    f"Tried paths: {candidate_hint or 'n/a'}. "
+                    "Ensure appropriate systemd journal permissions or set HOUSE_LIGHTS_LOG_FILE."
+                ),
                 status=503,
                 mimetype="text/plain",
             )
