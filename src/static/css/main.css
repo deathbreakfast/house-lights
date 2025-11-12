@@ -151,6 +151,12 @@ select {
     color: #4b5563;
 }
 
+.log-source {
+    margin: 0 0 0.75rem;
+    font-size: 0.85rem;
+    color: #6b7280;
+}
+
 .log-status[data-state="error"] {
     color: #dc2626;
 }

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import logging.handlers
 import os
 import selectors
 import shutil
 import subprocess
 import time
+from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 from flask import (
@@ -114,6 +117,29 @@ def create_app() -> Flask:
 
     app = Flask(__name__, template_folder="templates")
 
+    log_file_path = os.getenv("HOUSE_LIGHTS_LOG_FILE", "/var/log/houselights/app.log")
+    log_path_obj: Path | None = None
+    if log_file_path:
+        try:
+            log_path_obj = Path(log_file_path).expanduser()
+            log_path_obj.parent.mkdir(parents=True, exist_ok=True)
+            rotating_handler = logging.handlers.RotatingFileHandler(
+                log_path_obj, maxBytes=5 * 1_024 * 1_024, backupCount=5
+            )
+            rotating_handler.setFormatter(
+                logging.Formatter(
+                    fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+                    datefmt="%Y-%m-%dT%H:%M:%S",
+                )
+            )
+            rotating_handler.setLevel(logging.INFO)
+            logging.getLogger().addHandler(rotating_handler)
+            LOGGER.info("File logging enabled at %s", log_path_obj)
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.exception("Failed to initialize file logging handler.")
+            log_path_obj = None
+    app.config["LOG_FILE_PATH"] = log_path_obj
+
     patterns: list[tuple[str, str]] = [
         ("all_on_white", "All On (White)"),
         ("warm_glow", "Warm Glow"),
@@ -203,6 +229,33 @@ def create_app() -> Flask:
     def _journalctl_available() -> bool:
         return shutil.which("journalctl") is not None
 
+    def _read_recent_file_logs(max_lines: int = 200) -> str | None:
+        log_file: Path | None = app.config.get("LOG_FILE_PATH")
+        if not log_file or not log_file.exists():
+            LOGGER.debug("Log file not available for fallback: %s", log_file)
+            return None
+
+        try:
+            with log_file.open("r", encoding="utf-8", errors="replace") as handle:
+                tail_lines = deque(handle, maxlen=max_lines)
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.exception("Failed to read log file fallback at %s", log_file)
+            return None
+
+        payload = "".join(tail_lines).strip()
+        if payload:
+            LOGGER.info("File log fallback returning %s characters.", len(payload))
+            LOGGER.debug("File log fallback payload:\n%s", payload)
+            return payload
+
+        LOGGER.warning("File log fallback produced no output.")
+        return ""
+
+    def _build_log_response(payload: str, source: str) -> Response:
+        response = Response(payload, mimetype="text/plain")
+        response.headers["X-Log-Source"] = source
+        return response
+
     @app.get("/api/logs/recent")
     def recent_logs() -> Response:
         """Return the most recent journalctl output for the service."""
@@ -229,30 +282,31 @@ def create_app() -> Flask:
                 len(completed.stdout),
                 len(completed.stderr),
             )
+            payload = completed.stdout.strip()
+            if payload:
+                LOGGER.info("recent_logs returning %s characters.", len(payload))
+                LOGGER.debug("recent_logs payload:\n%s", payload)
+                return _build_log_response(payload, source="journalctl")
+            LOGGER.warning("recent_logs fetched no output; attempting file fallback.")
         except subprocess.CalledProcessError as exc:
             LOGGER.exception("Failed to read recent logs: command=%s", command)
             message = exc.stderr or exc.stdout or "Failed to retrieve logs."
-            return Response(message, status=500, mimetype="text/plain")
+            LOGGER.warning("recent_logs falling back to file due to journalctl error: %s", message)
+        except Exception:  # pragma: no cover - defensive logging
+            LOGGER.exception("Unexpected error calling journalctl; using file fallback.")
 
-        payload = completed.stdout.strip()
-        if payload:
-            LOGGER.info("recent_logs returning %s characters.", len(payload))
-            LOGGER.debug("recent_logs payload:\n%s", payload)
-        else:
-            LOGGER.warning("recent_logs fetched no output.")
-        return Response(payload, mimetype="text/plain")
+        fallback_payload = _read_recent_file_logs()
+        if fallback_payload is None:
+            return Response(
+                "Log data unavailable: journalctl failed and file fallback missing.",
+                status=503,
+                mimetype="text/plain",
+            )
+        return _build_log_response(fallback_payload, source="file")
 
     @app.get("/api/logs/live")
     def live_logs() -> Response:
         """Stream journald output as server-sent events for live log viewing."""
-
-        if not _journalctl_available():
-            LOGGER.warning("journalctl not available on host; unable to stream logs.")
-            return Response(
-                "journalctl not available on host system.",
-                status=503,
-                mimetype="text/plain",
-            )
 
         command = _build_journalctl_command(
             "--output",
@@ -261,7 +315,7 @@ def create_app() -> Flask:
             since="5 minutes ago",
         )
 
-        def event_stream() -> Iterable[str]:
+        def journal_event_stream() -> Iterable[str]:
             heartbeat_interval = 15.0
             LOGGER.debug("Opening journalctl live stream: command=%s", command)
             try:
@@ -282,6 +336,7 @@ def create_app() -> Flask:
             selector.register(process.stdout, selectors.EVENT_READ)
 
             try:
+                yield "event: source\ndata: journalctl\n\n"
                 next_heartbeat = time.monotonic() + heartbeat_interval
                 while True:
                     timeout = max(0.0, next_heartbeat - time.monotonic())
@@ -319,9 +374,50 @@ def create_app() -> Flask:
                     with contextlib.suppress(Exception):
                         process.wait(timeout=1)
 
+        def file_event_stream() -> Iterable[str]:
+            log_file: Path | None = app.config.get("LOG_FILE_PATH")
+            if not log_file or not log_file.exists():
+                LOGGER.error("File event stream requested but log file unavailable: %s", log_file)
+                yield "event: error\ndata: Log file unavailable for streaming.\n\n"
+                return
+
+            heartbeat_interval = 15.0
+            LOGGER.debug("Starting file-based log stream from %s", log_file)
+            try:
+                with log_file.open("r", encoding="utf-8", errors="replace") as handle:
+                    handle.seek(0, os.SEEK_END)
+                    next_heartbeat = time.monotonic() + heartbeat_interval
+                    yield "event: source\ndata: file\n\n"
+                    while True:
+                        line = handle.readline()
+                        if line:
+                            clean_line = line.rstrip()
+                            LOGGER.debug("file live_logs emitting line: %s", clean_line)
+                            yield f"data: {clean_line}\n\n"
+                            next_heartbeat = time.monotonic() + heartbeat_interval
+                        else:
+                            now = time.monotonic()
+                            if now >= next_heartbeat:
+                                LOGGER.debug("file live_logs emitting keep-alive event.")
+                                yield ": keep-alive\n\n"
+                                next_heartbeat = now + heartbeat_interval
+                            time.sleep(1.0)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOGGER.exception("Error streaming file logs: %s", exc)
+                yield f"event: error\ndata: {exc}\n\n"
+
+        if _journalctl_available():
+            event_stream = journal_event_stream
+            source = "journalctl"
+        else:
+            LOGGER.warning("journalctl not available; using file log stream.")
+            event_stream = file_event_stream
+            source = "file"
+
         response = Response(stream_with_context(event_stream()), mimetype="text/event-stream")
         response.headers["Cache-Control"] = "no-cache"
         response.headers["X-Accel-Buffering"] = "no"
+        response.headers["X-Log-Source"] = source
         return response
 
     @app.post("/lights/on")

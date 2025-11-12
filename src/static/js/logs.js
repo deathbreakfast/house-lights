@@ -3,6 +3,7 @@ const details = document.querySelector("[data-log-panel]");
 if (details) {
   const logOutput = details.querySelector("[data-log-output]");
   const statusEl = details.querySelector("[data-log-status]");
+  const sourceEl = details.querySelector("[data-log-source]");
   const refreshButton = details.querySelector('[data-action="refresh"]');
   const liveButton = details.querySelector('[data-action="toggle-live"]');
   const autoScrollCheckbox = details.querySelector('[data-action="auto-scroll"]');
@@ -10,6 +11,7 @@ if (details) {
   const EMPTY_MESSAGE = "No log entries yet.";
 
   let eventSource = null;
+  let currentSource = "unknown";
 
   const isEmptyPayload = (payload) => {
     const trimmed = payload.trim();
@@ -35,6 +37,26 @@ if (details) {
     } else if (logOutput.textContent === EMPTY_MESSAGE) {
       logOutput.textContent = "";
     }
+  };
+
+  const updateSource = (source) => {
+    currentSource = source || "unknown";
+    if (!sourceEl) {
+      return;
+    }
+
+    let label;
+    switch (currentSource) {
+      case "journalctl":
+        label = "Source: systemd journal";
+        break;
+      case "file":
+        label = "Source: local log file";
+        break;
+      default:
+        label = "Source: unknown";
+    }
+    sourceEl.textContent = label;
   };
 
   const scrollToBottom = () => {
@@ -67,6 +89,8 @@ if (details) {
       if (!response.ok) {
         throw new Error(payload || `Log request failed with status ${response.status}`);
       }
+
+      updateSource(response.headers.get("X-Log-Source"));
 
       if (isEmptyPayload(payload)) {
         markEmpty(true);
@@ -171,6 +195,11 @@ if (details) {
         stopLiveTail(false);
         setStatus("Log stream ended.", "error");
       });
+
+      eventSource.addEventListener("source", (event) => {
+        updateSource(event.data);
+        setStatus(`Streaming live logs from ${sourceEl?.textContent ?? event.data}…`);
+      });
     } catch (error) {
       console.error("Failed to start live log stream", error);
       stopLiveTail(false);
@@ -209,6 +238,7 @@ if (details) {
   if (details.open) {
     refreshLogs();
   }
+  updateSource(null);
 }
 
 const SCROLL_STORAGE_KEY = "houselights.scrollPosition";
