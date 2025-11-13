@@ -73,6 +73,15 @@ DEFAULT_PATTERN_DEFINITIONS: list[dict[str, object]] = [
         "loop": True,
         "color_cycle": ["#ff4000", "#800080"],
     },
+    {
+        "id": "valentine_solid",
+        "name": "Valentine (Solid)",
+        "description": "Alternating white and pink across every LED.",
+        "frame_rate": 8,
+        "duration": 10,
+        "loop": True,
+        "color_cycle": ["#ffffff", "#ff69b4"],
+    },
 ]
 
 LEGACY_PATTERN_IDS_TO_REMOVE: set[str] = {"warm_glow", "rainbow_wave"}
