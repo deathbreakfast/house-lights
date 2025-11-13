@@ -349,7 +349,10 @@ class PatternPlaybackWorker:
             durations.append(duration or minimum_step)
             return frames, durations
 
-        last_time = 0.0
+        last_time = sorted_keyframes[0].get("time", 0.0)
+        last_time = self._safe_float(last_time, 0.0)
+        first_time = last_time
+
         for index, frame in enumerate(sorted_keyframes):
             frame_time = self._safe_float(frame.get("time", last_time), last_time)
             frame_time = max(frame_time, last_time)
@@ -396,10 +399,14 @@ class PatternPlaybackWorker:
             if index + 1 < len(sorted_keyframes):
                 next_time = self._safe_float(sorted_keyframes[index + 1].get("time", frame_time), frame_time)
             else:
-                next_time = max(duration, frame_time + minimum_step)
+                next_time = max(frame_time + minimum_step, duration if duration > 0 else frame_time + minimum_step)
             frame_duration = max(minimum_step, next_time - frame_time)
             durations.append(frame_duration)
             last_time = frame_time
+
+        loop_length = max(last_time - first_time, minimum_step)
+        if loop_length < durations[-1]:
+            durations[-1] = loop_length
 
         return frames, durations
 
