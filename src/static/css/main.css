@@ -1193,6 +1193,7 @@ select {
     .pattern-meta-grid textarea {
         background: #0f172a;
         border-color: #334155;
+        color: #f8fafc;
     }
 
     .pattern-meta-grid input:focus,

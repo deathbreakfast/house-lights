@@ -1778,15 +1778,20 @@ function playbackStep(timestamp) {
   let advanced = false;
   while (state.playback.accumulator >= frameDuration) {
     state.playback.accumulator -= frameDuration;
-    state.timeline.currentTime = clampTimeToStep(
-      state.timeline.currentTime + frameDuration * state.playback.direction
-    );
-    advanced = true;
-    if (state.timeline.currentTime >= lastKeyframeTime) {
+    const nextTime = state.timeline.currentTime + frameDuration * state.playback.direction;
+    if (nextTime > lastKeyframeTime) {
+      state.timeline.currentTime = clampTimeToStep(lastKeyframeTime);
+      advanced = true;
+      const finalViewChange = scrollViewToTime(state.timeline.currentTime);
+      updatePlaybackUi(finalViewChange);
+      // Reset accumulation so that the next loop iteration starts from zero time
+      state.playback.accumulator = 0;
       state.timeline.currentTime = clampTimeToStep(0);
       scrollViewToTime(state.timeline.currentTime);
       break;
     }
+    state.timeline.currentTime = clampTimeToStep(nextTime);
+    advanced = true;
   }
 
   const viewChanged = scrollViewToTime(state.timeline.currentTime);
