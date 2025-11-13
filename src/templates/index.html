@@ -7,12 +7,18 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
   </head>
   <body>
-    <header>
-      <h1>House Lights Control</h1>
-      <p>
-        Review configured GPIO pins, light ranges, and manage the lighting system. Pattern
-        selection is a preview of the upcoming animation controls.
-      </p>
+    <header class="site-header">
+      <div class="header-top">
+        <h1>House Lights Control</h1>
+        <p>
+          Review configured GPIO pins, light ranges, and manage the lighting system. Pattern
+          selection is a preview of the upcoming animation controls.
+        </p>
+      </div>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="{{ url_for('index') }}" aria-current="page">Dashboard</a>
+        <a href="{{ url_for('configure_patterns') }}">Pattern Configurator</a>
+      </nav>
     </header>
 
     <section class="panel">
@@ -43,10 +49,45 @@
           {% endfor %}
         </select>
         <button type="submit">Apply Pattern</button>
+        <a class="ghost" href="{{ url_for('configure_patterns') }}">Create / Edit Patterns</a>
       </form>
       <p class="pattern-display">
         Current pattern: <strong>{{ dict(patterns).get(selected_pattern, selected_pattern) }}</strong>
       </p>
+      {% if pattern_summaries %}
+        <div class="pattern-summary">
+          <table class="pattern-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Duration</th>
+                <th>Frame Rate</th>
+                <th>Updated</th>
+                <th aria-label="Actions"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for pattern in pattern_summaries %}
+                <tr>
+                  <td>{{ pattern.name }}</td>
+                  <td>{{ pattern.duration or '—' }}</td>
+                  <td>{{ pattern.frame_rate or '—' }}</td>
+                  <td>{{ pattern.updated_at or '—' }}</td>
+                  <td class="pattern-actions">
+                    <a class="ghost" href="{{ url_for('configure_patterns') }}?pattern={{ pattern.id }}">
+                      Edit
+                    </a>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="pattern-summary-empty">
+          No patterns saved yet. Use the configurator to create your first animation.
+        </p>
+      {% endif %}
     </section>
 
     <section class="panel">

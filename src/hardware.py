@@ -34,12 +34,18 @@ class LightController(Protocol):
     def apply_pattern(self, pattern_id: str) -> None:
         """Activate the given lighting pattern."""
 
+    def set_pixel_test(
+        self, strip_pin: int, pixel_index: int, color: tuple[int, int, int] | None
+    ) -> None:
+        """Set a single pixel to a color for testing purposes; None turns it off."""
+
 
 class NoopLightController:
     """Fallback controller used when hardware is not available."""
 
     def __init__(self, strip_configs: list[LightStripConfig]) -> None:
         self.strip_configs = strip_configs
+        self._strip_map = {config.pin: config for config in strip_configs}
 
     def set_power(self, is_on: bool) -> None:  # pragma: no cover - logging only
         LOGGER.info(
@@ -53,6 +59,18 @@ class NoopLightController:
             "NoopLightController.apply_pattern called with pattern=%s; strips=%s",
             pattern_id,
             self.strip_configs,
+        )
+
+    def set_pixel_test(
+        self, strip_pin: int, pixel_index: int, color: tuple[int, int, int] | None
+    ) -> None:  # pragma: no cover - logging only
+        strip = self._strip_map.get(strip_pin)
+        LOGGER.info(
+            "NoopLightController.set_pixel_test pin=%s index=%s color=%s (strip=%s)",
+            strip_pin,
+            pixel_index,
+            color,
+            strip,
         )
 
 
@@ -71,6 +89,7 @@ class Ws2811LightController:
         self._strip_configs = strip_configs
         self._strips: list[PixelStrip] = []
         self._last_pattern: str = "all_on_white"
+        self._strip_by_pin: dict[int, PixelStrip] = {}
 
         for idx, config in enumerate(strip_configs):
             channel = 0 if idx == 0 else 1
@@ -92,6 +111,7 @@ class Ws2811LightController:
             )
             strip.begin()
             self._strips.append(strip)
+            self._strip_by_pin[config.pin] = strip
             LOGGER.info(
                 "Initialized WS2811 strip: pin=%s, leds=%s, channel=%s", config.pin, config.led_count, channel
             )
@@ -107,6 +127,34 @@ class Ws2811LightController:
             for idx in range(strip.numPixels()):
                 strip.setPixelColor(idx, Color(0, 0, 0))
             strip.show()
+
+    def set_pixel_test(
+        self, strip_pin: int, pixel_index: int, color: tuple[int, int, int] | None
+    ) -> None:
+        strip = self._strip_by_pin.get(strip_pin)
+        if strip is None:
+            LOGGER.warning(
+                "set_pixel_test called for unknown strip pin=%s (available=%s)",
+                strip_pin,
+                list(self._strip_by_pin),
+            )
+            return
+
+        if pixel_index < 0 or pixel_index >= strip.numPixels():
+            LOGGER.warning(
+                "set_pixel_test received out-of-range pixel_index=%s for pin=%s (max=%s)",
+                pixel_index,
+                strip_pin,
+                strip.numPixels(),
+            )
+            return
+
+        if color is None:
+            strip.setPixelColor(pixel_index, Color(0, 0, 0))
+        else:
+            r, g, b = color
+            strip.setPixelColor(pixel_index, Color(r, g, b))
+        strip.show()
 
     def apply_pattern(self, pattern_id: str) -> None:
         LOGGER.info("Applying pattern %s", pattern_id)

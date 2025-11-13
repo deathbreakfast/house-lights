@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import logging.handlers
 import os
@@ -12,12 +13,15 @@ import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+from uuid import uuid4
 
 from flask import (
     Flask,
     Response,
+    abort,
     jsonify,
     redirect,
     render_template,
@@ -27,6 +31,56 @@ from flask import (
 )
 
 from .hardware import LightStripConfig, build_controller
+
+SIMULATOR_PIN_POOL: tuple[int, ...] = (18, 13)
+MAX_SIMULATED_STRIPS = len(SIMULATOR_PIN_POOL)
+MAX_LED_COUNT_PER_STRIP = 250
+
+DEFAULT_PATTERN_DEFINITIONS: list[dict[str, object]] = [
+    {
+        "id": "all_on_white",
+        "name": "All On (White)",
+        "description": "All strips illuminated with white light.",
+        "frame_rate": 8,
+        "duration": 10,
+        "loop": True,
+        "strips": [],
+        "keyframes": [
+            {
+                "id": "kf-all-on-0",
+                "time": 0,
+                "overrides": {},
+            }
+        ],
+    },
+    {
+        "id": "warm_glow",
+        "name": "Warm Glow",
+        "description": "Soft warm white fade sequence.",
+        "frame_rate": 8,
+        "duration": 12,
+        "loop": True,
+        "strips": [],
+        "keyframes": [
+            {"id": "kf-warm-0", "time": 0, "overrides": {}},
+            {"id": "kf-warm-6", "time": 6, "overrides": {}},
+        ],
+    },
+    {
+        "id": "rainbow_wave",
+        "name": "Rainbow Wave",
+        "description": "Cycle through rainbow colors across strips.",
+        "frame_rate": 12,
+        "duration": 15,
+        "loop": True,
+        "strips": [],
+        "keyframes": [
+            {"id": "kf-rainbow-0", "time": 0, "overrides": {}},
+            {"id": "kf-rainbow-5", "time": 5, "overrides": {}},
+            {"id": "kf-rainbow-10", "time": 10, "overrides": {}},
+        ],
+    },
+]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -117,6 +171,15 @@ def create_app() -> Flask:
 
     app = Flask(__name__, template_folder="templates")
 
+    pattern_dir_env = os.getenv("HOUSE_LIGHTS_PATTERN_DIR")
+    pattern_dir = (
+        Path(pattern_dir_env).expanduser()
+        if pattern_dir_env
+        else Path.home() / ".houselights" / "patterns"
+    )
+    pattern_dir.mkdir(parents=True, exist_ok=True)
+    app.config["PATTERN_STORAGE_DIR"] = pattern_dir
+
     env_log_file = os.getenv("HOUSE_LIGHTS_LOG_FILE")
     candidate_paths: list[Path] = []
     if env_log_file:
@@ -160,13 +223,6 @@ def create_app() -> Flask:
 
     app.config["LOG_FILE_PATH"] = log_path_obj
 
-    patterns: list[tuple[str, str]] = [
-        ("all_on_white", "All On (White)"),
-        ("warm_glow", "Warm Glow"),
-        ("rainbow_wave", "Rainbow Wave"),
-        ("twinkle", "Twinkle"),
-    ]
-
     systemd_service_name = os.getenv("HOUSE_LIGHTS_SYSTEMD_SERVICE", "houselights")
 
     gpio_entries = _parse_config_list(os.getenv("HOUSE_LIGHTS_GPIO_PINS"))
@@ -175,12 +231,251 @@ def create_app() -> Flask:
     controller = build_controller(strip_configs)
 
     app.config["LIGHT_CONTROLLER"] = controller
-    app.config["PATTERNS"] = patterns
+    app.config["STRIP_CONFIGS"] = strip_configs
+    app.config["STRIP_CONFIGS_BY_PIN"] = {config.pin: config for config in strip_configs}
+    app.config["SIMULATED_STRIPS"]: list[LightStripConfig] = []
+    app.config["SIMULATED_STRIPS_BY_PIN"]: dict[int, LightStripConfig] = {}
+    app.config["SYSTEMD_SERVICE_NAME"] = systemd_service_name
+
+    def _now_iso() -> str:
+        return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def _pattern_dir() -> Path:
+        return app.config["PATTERN_STORAGE_DIR"]
+
+    def _is_valid_pattern_id(candidate: str) -> bool:
+        if not candidate:
+            return False
+        return all(ch.isalnum() or ch in {"-", "_"} for ch in candidate)
+
+    def _pattern_path(pattern_id: str) -> Path:
+        if not _is_valid_pattern_id(pattern_id):
+            abort(404, description="Invalid pattern identifier.")
+        return _pattern_dir() / f"{pattern_id}.json"
+
+    def _load_pattern_file(pattern_id: str) -> dict:
+        path = _pattern_path(pattern_id)
+        if not path.exists():
+            abort(404, description=f"Pattern '{pattern_id}' not found.")
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except json.JSONDecodeError as exc:
+            LOGGER.error("Failed to parse pattern file %s: %s", path, exc)
+            abort(500, description=f"Pattern file '{pattern_id}' is corrupted.")
+        keyframes = payload.get("keyframes")
+        if isinstance(keyframes, list):
+            keyframes.sort(key=lambda item: item.get("time", 0))
+        return payload
+        return payload
+
+    def _generate_pattern_id(name: str | None) -> str:
+        if name:
+            slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-")
+            slug = "-".join(filter(None, slug.split("-")))
+            if slug and _is_valid_pattern_id(slug):
+                candidate = slug
+                counter = 1
+                while _pattern_path(candidate).exists():
+                    candidate = f"{slug}-{counter}"
+                    counter += 1
+                return candidate
+        return uuid4().hex
+
+    def _normalize_keyframes(keyframes: list[dict]) -> list[dict]:
+        normalized: list[dict] = []
+        for raw in keyframes:
+            if not isinstance(raw, dict):
+                abort(400, description="Each keyframe must be an object.")
+            time_value = raw.get("time")
+            if not isinstance(time_value, (int, float)):
+                abort(400, description="Keyframe 'time' must be numeric.")
+            if time_value < 0:
+                abort(400, description="Keyframe 'time' must be zero or greater.")
+            overrides = raw.get("overrides", {})
+            if not isinstance(overrides, dict):
+                abort(400, description="Keyframe 'overrides' must be an object.")
+            normalized.append(
+                {
+                    "id": raw.get("id") or f"kf-{uuid4().hex[:8]}",
+                    "time": float(time_value),
+                    "overrides": overrides,
+                }
+            )
+        normalized.sort(key=lambda item: item["time"])
+        return normalized
+
+    def _validate_pattern_payload(payload: dict, *, require_name: bool = True) -> dict:
+        if not isinstance(payload, dict):
+            abort(400, description="Pattern payload must be a JSON object.")
+
+        name = payload.get("name")
+        if require_name and not isinstance(name, str):
+            abort(400, description="Pattern 'name' is required.")
+        if isinstance(name, str):
+            name = name.strip()
+            if not name:
+                abort(400, description="Pattern 'name' cannot be empty.")
+
+        frame_rate = payload.get("frame_rate", 8)
+        duration = payload.get("duration", 30)
+
+        try:
+            frame_rate_value = float(frame_rate)
+            duration_value = float(duration)
+        except (TypeError, ValueError):
+            abort(400, description="'frame_rate' and 'duration' must be numbers.")
+
+        if frame_rate_value <= 0:
+            abort(400, description="'frame_rate' must be greater than zero.")
+        if duration_value <= 0:
+            abort(400, description="'duration' must be greater than zero.")
+
+        loop = bool(payload.get("loop", True))
+        strips = payload.get("strips", [])
+        if strips is None:
+            strips = []
+        if not isinstance(strips, list):
+            abort(400, description="'strips' must be a list if provided.")
+
+        keyframes_raw = payload.get("keyframes", [])
+        if keyframes_raw is None:
+            keyframes_raw = []
+        if not isinstance(keyframes_raw, list):
+            abort(400, description="'keyframes' must be provided as a list.")
+        keyframes = _normalize_keyframes(keyframes_raw)
+
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            abort(400, description="'metadata' must be an object if provided.")
+
+        result = {
+            "frame_rate": frame_rate_value,
+            "duration": duration_value,
+            "loop": loop,
+            "strips": strips,
+            "keyframes": keyframes,
+            "metadata": metadata if metadata is not None else {},
+        }
+        if name is not None:
+            result["name"] = name
+        return result
+
+    def _write_pattern_file(pattern_id: str, payload: dict) -> dict:
+        pattern_payload = payload.copy()
+        pattern_payload["id"] = pattern_id
+        pattern_payload.setdefault("loop", True)
+        pattern_payload.setdefault("strips", [])
+        pattern_payload.setdefault("keyframes", [])
+        pattern_payload.setdefault("metadata", {})
+        if isinstance(pattern_payload["keyframes"], list):
+            pattern_payload["keyframes"] = sorted(
+                pattern_payload["keyframes"], key=lambda item: item.get("time", 0)
+            )
+        timestamp = _now_iso()
+        pattern_payload.setdefault("created_at", timestamp)
+        pattern_payload["updated_at"] = timestamp
+        path = _pattern_dir() / f"{pattern_id}.json"
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(pattern_payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        return pattern_payload
+
+    def _update_pattern_file(pattern_id: str, existing: dict, payload: dict) -> dict:
+        updated = existing.copy()
+        updated.update(payload)
+        updated["id"] = pattern_id
+        if isinstance(updated.get("keyframes"), list):
+            updated["keyframes"] = sorted(
+                updated["keyframes"], key=lambda item: item.get("time", 0)
+            )
+        updated["updated_at"] = _now_iso()
+        path = _pattern_dir() / f"{pattern_id}.json"
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(updated, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        return updated
+
+    def _load_pattern_summaries() -> list[dict]:
+        summaries: list[dict] = []
+        for file_path in sorted(_pattern_dir().glob("*.json")):
+            try:
+                with file_path.open("r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except Exception:  # pragma: no cover - defensive
+                LOGGER.exception("Failed reading pattern file %s", file_path)
+                continue
+            pattern_id = data.get("id") or file_path.stem
+            summaries.append(
+                {
+                    "id": pattern_id,
+                    "name": data.get("name", pattern_id),
+                    "duration": data.get("duration"),
+                    "frame_rate": data.get("frame_rate"),
+                    "updated_at": data.get("updated_at"),
+                }
+            )
+        return summaries
+
+    def _refresh_pattern_cache() -> None:
+        summaries = _load_pattern_summaries()
+        app.config["PATTERN_SUMMARIES"] = summaries
+        app.config["PATTERNS"] = [(item["id"], item["name"]) for item in summaries]
+        light_state = app.config.get("LIGHT_STATE")
+        if isinstance(light_state, dict):
+            current = light_state.get("selected_pattern")
+            available_ids = {item["id"] for item in summaries}
+            if current not in available_ids:
+                light_state["selected_pattern"] = summaries[0]["id"] if summaries else None
+
+    def _default_pattern_id() -> str | None:
+        patterns = app.config.get("PATTERNS") or []
+        return patterns[0][0] if patterns else None
+
+    def _pattern_exists(pattern_id: str | None) -> bool:
+        if not pattern_id or not _is_valid_pattern_id(pattern_id):
+            return False
+        return (_pattern_dir() / f"{pattern_id}.json").exists()
+
+    def _ensure_default_patterns() -> None:
+        existing_files = list(_pattern_dir().glob("*.json"))
+        if existing_files:
+            return
+        for definition in DEFAULT_PATTERN_DEFINITIONS:
+            pattern_id = definition.get("id") or uuid4().hex
+            keyframes: list[dict] = []
+            for frame in definition.get("keyframes", []):
+                keyframes.append(
+                    {
+                        "id": frame.get("id") or f"kf-{uuid4().hex[:8]}",
+                        "time": float(frame.get("time", 0.0)),
+                        "overrides": frame.get("overrides", {}),
+                    }
+                )
+            keyframes.sort(key=lambda item: item["time"])
+            metadata = definition.get("metadata") or {}
+            description = definition.get("description")
+            if description and "description" not in metadata:
+                metadata = {**metadata, "description": description}
+            payload = {
+                "name": definition.get("name", pattern_id),
+                "frame_rate": float(definition.get("frame_rate", 8)),
+                "duration": float(definition.get("duration", 30)),
+                "loop": bool(definition.get("loop", True)),
+                "strips": definition.get("strips", []),
+                "keyframes": keyframes,
+                "metadata": metadata,
+            }
+            _write_pattern_file(pattern_id, payload)
+
+    _ensure_default_patterns()
+    _refresh_pattern_cache()
+
+    default_pattern = app.config["PATTERNS"][0][0] if app.config["PATTERNS"] else None
     app.config["LIGHT_STATE"] = {
         "is_on": False,
-        "selected_pattern": patterns[0][0],
+        "selected_pattern": default_pattern,
     }
-    app.config["SYSTEMD_SERVICE_NAME"] = systemd_service_name
 
     @app.get("/health")
     def health() -> tuple[dict[str, str], int]:
@@ -198,16 +493,31 @@ def create_app() -> Flask:
             gpio_entries=current_gpio_entries,
             light_range_entries=light_range_config,
             patterns=app.config["PATTERNS"],
+            pattern_summaries=app.config.get("PATTERN_SUMMARIES", []),
             selected_pattern=light_state["selected_pattern"],
             is_on=light_state["is_on"],
+        )
+
+    @app.get("/patterns/configure")
+    def configure_patterns() -> str:
+        """Render the pattern configurator view."""
+        return render_template(
+            "configure.html",
+            patterns=app.config["PATTERNS"],
         )
 
     def _apply_current_pattern() -> None:
         controller = app.config["LIGHT_CONTROLLER"]
         light_state = app.config["LIGHT_STATE"]
-        if light_state["is_on"]:
-            LOGGER.info("Applying pattern: %s", light_state["selected_pattern"])
-            controller.apply_pattern(light_state["selected_pattern"])
+        pattern_id = light_state.get("selected_pattern")
+        if not light_state.get("is_on"):
+            LOGGER.debug("Skipping pattern apply because lights are off.")
+            return
+        if not pattern_id:
+            LOGGER.warning("No pattern selected; unable to apply lighting pattern.")
+            return
+        LOGGER.info("Applying pattern: %s", pattern_id)
+        controller.apply_pattern(pattern_id)
 
     def _set_light_power(is_on: bool) -> None:
         """Update in-memory light power state and notify the controller."""
@@ -217,16 +527,26 @@ def create_app() -> Flask:
         controller = app.config["LIGHT_CONTROLLER"]
         controller.set_power(is_on)
         if is_on:
-            # Default to the all white pattern when powering on.
-            if light_state["selected_pattern"] != "all_on_white":
-                light_state["selected_pattern"] = "all_on_white"
-                LOGGER.debug("Defaulting pattern to all_on_white while powering on.")
-            _apply_current_pattern()
+            selected = light_state.get("selected_pattern")
+            if not selected or not _pattern_exists(selected):
+                fallback = _default_pattern_id()
+                if fallback:
+                    LOGGER.debug("Defaulting pattern to %s while powering on.", fallback)
+                    light_state["selected_pattern"] = fallback
+                    selected = fallback
+                else:
+                    LOGGER.warning("No patterns available to apply after powering on.")
+                    selected = None
+            if selected:
+                _apply_current_pattern()
         else:
             LOGGER.debug("Lights powered off; skipping pattern application.")
 
     def _set_pattern(pattern_id: str) -> None:
         """Update the in-memory selected pattern and notify the controller."""
+        if not _pattern_exists(pattern_id):
+            LOGGER.warning("Attempted to select unknown pattern '%s'.", pattern_id)
+            return
         light_state = app.config["LIGHT_STATE"]
         light_state["selected_pattern"] = pattern_id
         LOGGER.info("Pattern selected: %s", pattern_id)
@@ -275,6 +595,249 @@ def create_app() -> Flask:
         response = Response(payload, mimetype="text/plain")
         response.headers["X-Log-Source"] = source
         return response
+
+    def _active_strip_configs() -> list[LightStripConfig]:
+        physical: list[LightStripConfig] = app.config.get("STRIP_CONFIGS", [])
+        if physical:
+            return physical
+        return app.config.get("SIMULATED_STRIPS", [])
+
+    def _simulator_enabled() -> bool:
+        physical: list[LightStripConfig] = app.config.get("STRIP_CONFIGS", [])
+        return len(physical) == 0
+
+    def _register_simulated_strip(config: LightStripConfig) -> None:
+        simulated: list[LightStripConfig] = app.config["SIMULATED_STRIPS"]
+        simulated.append(config)
+        app.config["SIMULATED_STRIPS_BY_PIN"][config.pin] = config
+
+    def _remove_simulated_strip(pin: int) -> bool:
+        simulated: list[LightStripConfig] = app.config["SIMULATED_STRIPS"]
+        sim_map: dict[int, LightStripConfig] = app.config["SIMULATED_STRIPS_BY_PIN"]
+        config = sim_map.pop(pin, None)
+        if config is None:
+            return False
+        try:
+            simulated.remove(config)
+        except ValueError:
+            pass
+        return True
+
+    def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+        """Convert a hex color string (#RRGGBB or RRGGBB) to an RGB tuple."""
+        value = value.strip().lower()
+        if value.startswith("#"):
+            value = value[1:]
+        if len(value) != 6:
+            raise ValueError("Expected a 6-character hex color.")
+        r = int(value[0:2], 16)
+        g = int(value[2:4], 16)
+        b = int(value[4:6], 16)
+        return r, g, b
+
+    def _lookup_strip_config(pin: int) -> LightStripConfig:
+        config_map: dict[int, LightStripConfig] = app.config.get("STRIP_CONFIGS_BY_PIN", {})
+        config = config_map.get(pin)
+        if config is not None:
+            return config
+        sim_map: dict[int, LightStripConfig] = app.config.get("SIMULATED_STRIPS_BY_PIN", {})
+        config = sim_map.get(pin)
+        if config is None:
+            abort(404, description=f"No strip configured for pin {pin}.")
+        return config
+
+    @app.get("/api/strips")
+    def list_strips() -> Response:
+        """Return metadata for all configured strips or active simulator strips."""
+        strips: list[LightStripConfig] = _active_strip_configs()
+        from_simulator = _simulator_enabled()
+        payload = [
+            {
+                "pin": config.pin,
+                "led_count": config.led_count,
+                "name": config.name,
+                "label": config.name or f"Strip on pin {config.pin}",
+                "simulated": from_simulator,
+            }
+            for config in strips
+        ]
+        response_payload = {
+            "mode": "simulator" if from_simulator else "hardware",
+            "strips": payload,
+            "limits": {
+                "max_strips": MAX_SIMULATED_STRIPS,
+                "max_leds_per_strip": MAX_LED_COUNT_PER_STRIP,
+            },
+        }
+        return jsonify(response_payload)
+
+    @app.post("/api/strips/simulator")
+    def create_simulated_strip() -> Response:
+        """Add a simulated strip for local testing (limited to hardware PWM capabilities)."""
+        if not _simulator_enabled():
+            abort(409, description="Simulator disabled while hardware strips are configured.")
+
+        simulated: list[LightStripConfig] = app.config["SIMULATED_STRIPS"]
+        if len(simulated) >= MAX_SIMULATED_STRIPS:
+            abort(400, description="Simulator already has the maximum number of strips.")
+
+        payload = request.get_json(silent=True) or {}
+        try:
+            led_count = int(payload.get("led_count", 0))
+        except (TypeError, ValueError):
+            led_count = 0
+        if led_count <= 0 or led_count > MAX_LED_COUNT_PER_STRIP:
+            abort(
+                400,
+                description=(
+                    f"LED count must be between 1 and {MAX_LED_COUNT_PER_STRIP} for the simulator."
+                ),
+            )
+
+        requested_name = payload.get("name")
+        name = requested_name.strip() if isinstance(requested_name, str) else ""
+        if not name:
+            name = f"Simulated Strip {len(simulated) + 1}"
+
+        used_pins = {config.pin for config in simulated}
+        next_pin = next((pin for pin in SIMULATOR_PIN_POOL if pin not in used_pins), None)
+        if next_pin is None:
+            abort(400, description="No available PWM channels remain for simulation.")
+
+        config = LightStripConfig(pin=next_pin, led_count=led_count, name=name)
+        _register_simulated_strip(config)
+
+        return (
+            jsonify(
+                {
+                    "pin": config.pin,
+                    "led_count": config.led_count,
+                    "name": config.name,
+                    "label": config.name or f"Strip on pin {config.pin}",
+                    "simulated": True,
+                }
+            ),
+            201,
+        )
+
+    @app.delete("/api/strips/simulator/<int:pin>")
+    def delete_simulated_strip(pin: int) -> Response:
+        """Remove a simulated strip."""
+        if not _simulator_enabled():
+            abort(409, description="Simulator disabled while hardware strips are configured.")
+
+        removed = _remove_simulated_strip(pin)
+        if not removed:
+            abort(404, description=f"No simulated strip found for pin {pin}.")
+        return jsonify({"status": "ok", "pin": pin})
+
+    @app.post("/api/strips/<int:pin>/led/<int:pixel_index>")
+    def test_strip_pixel(pin: int, pixel_index: int) -> Response:
+        """Toggle or set an individual LED for testing."""
+        strip_config = _lookup_strip_config(pin)
+        if pixel_index < 0 or pixel_index >= strip_config.led_count:
+            abort(
+                400,
+                description=(
+                    f"LED index {pixel_index} out of range for strip on pin {pin}; "
+                    f"valid range is 0-{strip_config.led_count - 1}."
+                ),
+            )
+
+        payload = request.get_json(silent=True) or {}
+        is_on = payload.get("on", True)
+        color_value = payload.get("color")
+
+        color_tuple: tuple[int, int, int] | None
+        if is_on:
+            if not color_value:
+                abort(400, description="Color value is required when turning an LED on.")
+            try:
+                color_tuple = _hex_to_rgb(color_value)
+            except ValueError as exc:
+                abort(400, description=str(exc))
+        else:
+            color_tuple = None
+
+        controller = app.config["LIGHT_CONTROLLER"]
+        controller.set_pixel_test(pin, pixel_index, color_tuple)
+
+        return jsonify(
+            {
+                "status": "ok",
+                "pin": pin,
+                "pixel_index": pixel_index,
+                "on": bool(is_on),
+                "color": color_value if color_tuple else None,
+            }
+        )
+
+    @app.get("/api/patterns")
+    def list_patterns_api() -> Response:
+        """Return summaries for all stored patterns."""
+        _refresh_pattern_cache()
+        return jsonify({"patterns": app.config.get("PATTERN_SUMMARIES", [])})
+
+    @app.post("/api/patterns")
+    def create_pattern() -> Response:
+        """Create a new lighting pattern."""
+        payload = request.get_json(silent=True) or {}
+        sanitized = _validate_pattern_payload(payload, require_name=True)
+
+        requested_id = payload.get("id")
+        if requested_id is not None:
+            if not isinstance(requested_id, str):
+                abort(400, description="Pattern 'id' must be a string when provided.")
+            requested_id = requested_id.strip()
+            if not _is_valid_pattern_id(requested_id):
+                abort(
+                    400,
+                    description=(
+                        "Pattern 'id' may only contain letters, numbers, hyphens, or underscores."
+                    ),
+                )
+            if (_pattern_dir() / f"{requested_id}.json").exists():
+                abort(409, description=f"Pattern '{requested_id}' already exists.")
+            pattern_id = requested_id
+        else:
+            pattern_id = _generate_pattern_id(payload.get("name"))
+
+        created = _write_pattern_file(pattern_id, sanitized)
+        _refresh_pattern_cache()
+        return jsonify(created), 201
+
+    @app.get("/api/patterns/<string:pattern_id>")
+    def fetch_pattern(pattern_id: str) -> Response:
+        """Return the full JSON payload for a stored pattern."""
+        pattern = _load_pattern_file(pattern_id)
+        return jsonify(pattern)
+
+    @app.put("/api/patterns/<string:pattern_id>")
+    def update_pattern(pattern_id: str) -> Response:
+        """Replace an existing pattern with a new definition."""
+        existing = _load_pattern_file(pattern_id)
+        payload = request.get_json(silent=True) or {}
+        incoming_id = payload.get("id")
+        if incoming_id is not None and incoming_id != pattern_id:
+            abort(400, description="Pattern 'id' in payload must match the URL segment.")
+
+        sanitized = _validate_pattern_payload(payload, require_name=True)
+        updated = _update_pattern_file(pattern_id, existing, sanitized)
+        _refresh_pattern_cache()
+        return jsonify(updated)
+
+    @app.delete("/api/patterns/<string:pattern_id>")
+    def delete_pattern(pattern_id: str) -> Response:
+        """Delete a stored pattern definition."""
+        path = _pattern_path(pattern_id)
+        if not path.exists():
+            abort(404, description=f"Pattern '{pattern_id}' not found.")
+        path.unlink()
+        _refresh_pattern_cache()
+        light_state = app.config.get("LIGHT_STATE")
+        if isinstance(light_state, dict) and light_state.get("selected_pattern") == pattern_id:
+            light_state["selected_pattern"] = _default_pattern_id()
+        return jsonify({"status": "ok", "id": pattern_id})
 
     @app.get("/api/logs/recent")
     def recent_logs() -> Response:

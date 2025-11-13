@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Pattern Configurator • House Lights</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="header-top">
+        <h1>Pattern Configurator</h1>
+        <p>
+          Visualize LED strips, test individual lights, and prepare for upcoming animation tools. Image layout
+          editing, keyframe timelines, and audio sync are represented with roadmap placeholders below.
+        </p>
+      </div>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="{{ url_for('index') }}">Dashboard</a>
+        <a href="{{ url_for('configure_patterns') }}" aria-current="page">Pattern Configurator</a>
+      </nav>
+    </header>
+
+    <main class="configurator-body">
+      <section class="panel pattern-meta" data-pattern-meta>
+        <header class="pattern-meta-header">
+          <div>
+            <h2>Pattern Details</h2>
+            <p>Set the name and notes for this animation, then save it to your library.</p>
+          </div>
+          <div class="pattern-meta-status">
+            <span class="pattern-id-badge" data-pattern-id>Unsaved pattern</span>
+            <span class="pattern-status" data-pattern-status aria-live="polite"></span>
+          </div>
+        </header>
+        <div class="pattern-meta-grid">
+          <label>
+            Name
+            <input
+              type="text"
+              placeholder="e.g. Winter Glow"
+              autocomplete="off"
+              data-pattern-name
+            />
+          </label>
+          <label>
+            Notes
+            <textarea
+              rows="2"
+              placeholder="Describe timing, music references, or installation details."
+              data-pattern-description
+            ></textarea>
+          </label>
+        </div>
+        <div class="pattern-meta-actions">
+          <button type="button" class="primary" data-action="pattern-save" disabled>Save</button>
+          <button type="button" data-action="pattern-save-as" disabled>Save As Copy</button>
+          <button type="button" class="ghost" data-action="pattern-new">New Pattern</button>
+        </div>
+      </section>
+
+      <div class="simulator-banner" data-sim-banner hidden>
+        <strong>Simulation Mode Enabled.</strong>
+        No hardware strips detected. Configure up to two simulated strips to experiment with layouts and timelines.
+        Uploads may not reflect production pin mappings.
+      </div>
+
+      <section class="panel configurator-panel">
+        <section class="strip-visualization" data-strip-visualization>
+          <div class="strip-selector" data-strip-summary>
+            <header class="strip-selector-heading">
+              <h2 data-strip-title>LED Strips</h2>
+              <p class="summary-helper">Select a strip to render its LEDs.</p>
+            </header>
+            <div class="simulator-controls" data-sim-controls hidden>
+              <p class="simulator-copy">
+                Add simulated strips to match your planned installation. Each strip supports up to 250 LEDs.
+              </p>
+              <div class="simulator-form">
+                <label>
+                  LED Count
+                  <input
+                    type="number"
+                    min="1"
+                    max="250"
+                    value="60"
+                    data-sim-led-count
+                  />
+                </label>
+                <button type="button" class="primary" data-action="sim-add-strip">
+                  Add Simulated Strip
+                </button>
+              </div>
+              <p class="simulator-hint" data-sim-hint>
+                Simulator supports two strips (PWM channels 18 &amp; 13).
+              </p>
+            </div>
+            <ul class="strip-list" data-strip-list>
+              <li class="strip-list-empty" data-strip-empty>Detecting configured strips…</li>
+            </ul>
+          </div>
+
+          <header class="visualization-header">
+            <h3>LED Layout</h3>
+            <p>Select LEDs below to preview and configure their colors.</p>
+          </header>
+
+          <div class="visualization-toolbar">
+            <div class="toolbar-group">
+              <button type="button" data-action="zoom-out" title="Zoom out (Ctrl + scroll)">
+                −
+              </button>
+              <button type="button" data-action="zoom-in" title="Zoom in (Ctrl + scroll)">
+                +
+              </button>
+              <button type="button" data-action="zoom-reset" title="Reset view">
+                ↺
+              </button>
+            </div>
+            <div class="visualization-hints">
+              <span title="Hold Space while dragging to pan">␣ + drag</span>
+              <span title="Hold Ctrl and scroll to zoom">Ctrl + Scroll</span>
+            </div>
+          </div>
+
+          <div class="visualization-stage" data-visualization-stage>
+            <div class="visualization-surface" data-layout-surface>
+              <p class="visualization-placeholder">Choose a strip to preview its LEDs.</p>
+              <button
+                type="button"
+                class="layout-upload"
+                disabled
+                data-tooltip="Uploading reference imagery is coming soon."
+              >
+                Upload Reference Image
+              </button>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel timeline-panel timeline-suite" data-timeline-suite data-disabled="true">
+        <header class="timeline-header">
+          <div>
+            <h2>Timeline &amp; Audio Sync (Roadmap)</h2>
+            <p>
+              Use the slider to scrub the animation. Keyframes, audio sync, and transmission support are under active
+              development.
+            </p>
+          </div>
+          <div class="timeline-header-controls">
+            <button type="button" data-action="timeline-expand">Expand +30s</button>
+            <label>
+              Frame Rate
+              <select data-timeline-framerate>
+                <option value="4">4 fps</option>
+                <option value="8" selected>8 fps</option>
+                <option value="12">12 fps</option>
+                <option value="24">24 fps</option>
+              </select>
+            </label>
+          </div>
+        </header>
+
+        <div class="timeline-track-wrapper">
+          <div class="timeline-range">
+            <input
+              type="range"
+              min="0"
+              max="10"
+              step="0.125"
+              value="0"
+              data-timeline-slider
+            />
+            <div class="timeline-scrub" data-timeline-scrub></div>
+            <div class="keyframe-track" data-keyframe-track></div>
+            <div class="timeline-axis" data-timeline-axis></div>
+          </div>
+          <div class="timeline-audio" data-timeline-audio>
+            <div class="audio-wave"></div>
+            <div class="timeline-scrub timeline-scrub--audio" data-timeline-scrub></div>
+          </div>
+        </div>
+
+        <div class="timeline-actions">
+          <button type="button" class="primary" data-action="timeline-add-keyframe">Add Keyframe</button>
+          <button type="button" data-action="timeline-play">Play</button>
+          <button type="button" data-action="timeline-audio-upload" class="ghost" disabled>
+            Upload Audio (Coming Soon)
+          </button>
+          <span class="timeline-duration" data-timeline-duration>Duration: 30s</span>
+        </div>
+
+        <div class="timeline-zoom-controls">
+          <label>
+            Zoom Window
+            <input type="range" min="2" max="30" step="1" value="10" data-timeline-zoom />
+          </label>
+        </div>
+        <div class="timeline-scrollbar" data-timeline-scroll>
+          <div class="timeline-scroll-thumb" data-timeline-scroll-thumb></div>
+        </div>
+      </section>
+
+      <section class="panel led-detail" data-led-detail>
+        <header>
+          <h2>LED Inspector</h2>
+          <p>Pick an LED node to toggle power or test a color.</p>
+        </header>
+        <form data-led-form>
+          <div class="led-form-grid">
+            <label class="toggle-field">
+              <input type="checkbox" name="led-on" data-led-on />
+              LED On
+            </label>
+            <label class="color-field">
+              <span>Color</span>
+              <input type="color" name="led-color" value="#ffffff" data-led-color />
+            </label>
+            <div class="button-stack">
+              <button type="button" class="primary" data-action="test-led" disabled>Test LED</button>
+              <button type="button" data-action="apply-led" disabled>Apply Change</button>
+            </div>
+          </div>
+          <p class="led-status" role="status" data-led-status>Pick an LED to enable controls.</p>
+        </form>
+      </section>
+    </main>
+
+    <script type="module" src="{{ url_for('static', filename='js/configurator.js') }}"></script>
+  </body>
+</html>
+
