@@ -259,6 +259,7 @@ class PatternPlaybackWorker:
         self._stop_event = threading.Event()
         self._strip_map = strip_map
         self.frames, self.durations = self._build_frames(pattern_payload, pattern_strips)
+        self.loop_enabled = bool(pattern_payload.get("loop", True))
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -271,6 +272,7 @@ class PatternPlaybackWorker:
     def _run(self) -> None:
         if not self.frames:
             return
+
         while not self._stop_event.is_set():
             for frame, duration in zip(self.frames, self.durations):
                 if self._stop_event.is_set():
@@ -280,6 +282,8 @@ class PatternPlaybackWorker:
                     continue
                 if self._stop_event.wait(duration):
                     return
+            if not self.loop_enabled:
+                break
 
     def _write_frame(self, frame: dict[int, list[int]]) -> None:
         for pin, strip in self._strip_map.items():
