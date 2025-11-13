@@ -71,7 +71,7 @@ DEFAULT_PATTERN_DEFINITIONS: list[dict[str, object]] = [
         "frame_rate": 8,
         "duration": 10,
         "loop": True,
-        "color_cycle": ["#ff8c00", "#800080"],
+        "color_cycle": ["#ff4000", "#800080"],
     },
 ]
 
