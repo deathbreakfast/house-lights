@@ -213,12 +213,13 @@ class Ws2811LightController:
             return
 
         states: dict[int, list[int]] = {}
+        default_state = self._encode_color(0, 0, 0)
         for config in strips:
             strip = self._strip_by_pin.get(config.pin)
             if strip is None:
                 LOGGER.debug("Skipping pattern render for unknown strip pin=%s", config.pin)
                 continue
-            states[config.pin] = [self._encode_color(0, 0, 0) for _ in range(config.led_count)]
+            states[config.pin] = [default_state for _ in range(config.led_count)]
 
         keyframes = pattern_payload.get("keyframes") or []
         try:
@@ -254,6 +255,15 @@ class Ws2811LightController:
             frame_time = float(frame.get("time", 0.0))
             if current_time + 1e-6 < frame_time:
                 current_time = frame_time
+
+            # Reset every strip to off before applying this frame
+            for config in strips:
+                strip_state = states.get(config.pin)
+                if strip_state is None:
+                    continue
+                for idx in range(len(strip_state)):
+                    strip_state[idx] = default_state
+
             overrides = frame.get("overrides")
             if isinstance(overrides, dict):
                 for key, override in overrides.items():
@@ -278,7 +288,7 @@ class Ws2811LightController:
                         color_hex = override.get("color", "#ffffff")
                         brightness_value = override.get("brightness", 100)
                     if not is_on:
-                        strip_state[index] = self._encode_color(0, 0, 0)
+                        strip_state[index] = default_state
                         continue
                     base_r, base_g, base_b = self._hex_to_rgb(str(color_hex))
                     try:
@@ -292,10 +302,6 @@ class Ws2811LightController:
                     blue = self._clamp_byte(base_b * factor)
                     strip_state[index] = self._encode_color(red, green, blue)
 
-                    strip = self._strip_by_pin.get(pin)
-                    if strip is not None and index < strip.numPixels():
-                        strip.setPixelColor(index, strip_state[index])
-
             for config in strips:
                 strip = self._strip_by_pin.get(config.pin)
                 if strip is None:
@@ -303,6 +309,10 @@ class Ws2811LightController:
                 strip_state = states.get(config.pin)
                 if strip_state is None:
                     continue
+                for idx, encoded_color in enumerate(strip_state):
+                    if idx >= strip.numPixels():
+                        break
+                    strip.setPixelColor(idx, encoded_color)
                 strip.show()
 
             frame_index += 1
