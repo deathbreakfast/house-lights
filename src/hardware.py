@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import os
 from dataclasses import dataclass
@@ -37,6 +38,9 @@ class LightController(Protocol):
 
     def render_pattern(self, pattern_payload: dict, strips: list["LightStripConfig"]) -> None:
         """Render a rich pattern definition onto the configured strips."""
+
+    def stop_pattern(self) -> None:
+        """Stop any active pattern playback."""
 
     def set_pixel_test(
         self, strip_pin: int, pixel_index: int, color: tuple[int, int, int] | None
@@ -75,6 +79,9 @@ class NoopLightController:
             list(pattern_payload.keys()),
         )
 
+    def stop_pattern(self) -> None:  # pragma: no cover - logging only
+        LOGGER.info("NoopLightController.stop_pattern called")
+
     def set_pixel_test(
         self, strip_pin: int, pixel_index: int, color: tuple[int, int, int] | None
     ) -> None:  # pragma: no cover - logging only
@@ -104,6 +111,8 @@ class Ws2811LightController:
         self._strips: list[PixelStrip] = []
         self._last_pattern: str = "all_on_white"
         self._strip_by_pin: dict[int, PixelStrip] = {}
+        self._playback_worker: PatternPlaybackWorker | None = None
+        self._playback_lock = threading.Lock()
 
         for idx, config in enumerate(strip_configs):
             channel = 0 if idx == 0 else 1
@@ -161,6 +170,7 @@ class Ws2811LightController:
             return
 
         LOGGER.info("Powering off lighting; clearing all strips.")
+        self.stop_pattern()
         for strip in self._strips:
             for idx in range(strip.numPixels()):
                 strip.setPixelColor(idx, self._encode_color(0, 0, 0))
@@ -212,58 +222,134 @@ class Ws2811LightController:
             LOGGER.warning("No hardware strips initialized; skipping render.")
             return
 
-        states: dict[int, list[int]] = {}
-        default_state = self._encode_color(0, 0, 0)
-        for config in strips:
-            strip = self._strip_by_pin.get(config.pin)
-            if strip is None:
-                LOGGER.debug("Skipping pattern render for unknown strip pin=%s", config.pin)
-                continue
-            states[config.pin] = [default_state for _ in range(config.led_count)]
+        with self._playback_lock:
+            if self._playback_worker is not None:
+                self._playback_worker.stop()
+                self._playback_worker = None
+
+            worker = PatternPlaybackWorker(self, pattern_payload, strips, self._strip_by_pin)
+            if not worker.frames:
+                LOGGER.warning("Pattern %s produced no frames; skipping playback.", pattern_id)
+                return
+            worker.start()
+            self._playback_worker = worker
+
+    def stop_pattern(self) -> None:
+        with self._playback_lock:
+            if self._playback_worker is not None:
+                self._playback_worker.stop()
+                self._playback_worker = None
+
+    def _apply_all_on_white(self) -> None:
+        for strip in self._strips:
+            for idx in range(strip.numPixels()):
+                strip.setPixelColor(idx, self._encode_color(255, 255, 255))
+            strip.show()
+
+
+class PatternPlaybackWorker:
+    def __init__(
+        self,
+        controller: "Ws2811LightController",
+        pattern_payload: dict,
+        pattern_strips: list[LightStripConfig],
+        strip_map: dict[int, PixelStrip],
+    ) -> None:
+        self._controller = controller
+        self._stop_event = threading.Event()
+        self._strip_map = strip_map
+        self.frames, self.durations = self._build_frames(pattern_payload, pattern_strips)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        if not self.frames:
+            return
+        while not self._stop_event.is_set():
+            for frame, duration in zip(self.frames, self.durations):
+                if self._stop_event.is_set():
+                    return
+                self._write_frame(frame)
+                if duration <= 0:
+                    continue
+                if self._stop_event.wait(duration):
+                    return
+
+    def _write_frame(self, frame: dict[int, list[int]]) -> None:
+        for pin, strip in self._strip_map.items():
+            state = frame.get(pin)
+            if state is None:
+                state = [self._controller._encode_color(0, 0, 0) for _ in range(strip.numPixels())]
+            for idx in range(strip.numPixels()):
+                color_value = state[idx] if idx < len(state) else self._controller._encode_color(0, 0, 0)
+                strip.setPixelColor(idx, color_value)
+            strip.show()
+
+    @staticmethod
+    def _safe_float(value, fallback: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    def _build_frames(
+        self, pattern_payload: dict, pattern_strips: list[LightStripConfig]
+    ) -> tuple[list[dict[int, list[int]]], list[float]]:
+        available_strips: dict[int, PixelStrip] = {
+            pin: strip for pin, strip in self._strip_map.items() if strip is not None
+        }
+
+        if not available_strips:
+            return ([], [])
+
+        strip_lengths: dict[int, int] = {
+            pin: strip.numPixels() for pin, strip in available_strips.items()
+        }
+
+        default_state = self._controller._encode_color(0, 0, 0)
 
         keyframes = pattern_payload.get("keyframes") or []
         try:
             sorted_keyframes = sorted(
-                keyframes,
-                key=lambda frame: float(frame.get("time", 0.0)),
+                keyframes, key=lambda frame: self._safe_float(frame.get("time", 0.0), 0.0)
             )
         except Exception:  # pragma: no cover - defensive
             LOGGER.exception("Failed sorting keyframes; applying in original order.")
             sorted_keyframes = keyframes
 
-        frame_rate = pattern_payload.get("frame_rate")
-        try:
-            frame_rate_value = float(frame_rate)
-        except (TypeError, ValueError):
-            frame_rate_value = 8.0
-        frame_rate_value = max(frame_rate_value, 0.1)
-        step_duration = 1.0 / frame_rate_value
+        frame_rate = self._safe_float(pattern_payload.get("frame_rate"), 8.0)
+        frame_rate = max(frame_rate, 0.1)
+        minimum_step = 1.0 / frame_rate
 
-        duration_value = pattern_payload.get("duration")
-        try:
-            duration_seconds = float(duration_value)
-        except (TypeError, ValueError):
-            duration_seconds = sorted_keyframes[-1]["time"] if sorted_keyframes else 30.0
-        duration_seconds = max(duration_seconds, step_duration)
+        duration = self._safe_float(pattern_payload.get("duration"), 0.0)
+        if not sorted_keyframes:
+            duration = max(duration, minimum_step)
 
-        current_time = 0.0
-        start_time = time.monotonic()
-        frame_index = 0
+        frames: list[dict[int, list[int]]] = []
+        durations: list[float] = []
 
-        while current_time <= duration_seconds and frame_index < len(sorted_keyframes):
-            frame = sorted_keyframes[frame_index]
-            frame_time = float(frame.get("time", 0.0))
-            if current_time + 1e-6 < frame_time:
-                current_time = frame_time
+        def build_blank_frame() -> dict[int, list[int]]:
+            return {
+                pin: [default_state for _ in range(strip_lengths[pin])]
+                for pin in available_strips
+            }
 
-            # Reset every strip to off before applying this frame
-            for config in strips:
-                strip_state = states.get(config.pin)
-                if strip_state is None:
-                    continue
-                for idx in range(len(strip_state)):
-                    strip_state[idx] = default_state
+        if not sorted_keyframes:
+            frames.append(build_blank_frame())
+            durations.append(duration or minimum_step)
+            return frames, durations
 
+        last_time = 0.0
+        for index, frame in enumerate(sorted_keyframes):
+            frame_time = self._safe_float(frame.get("time", last_time), last_time)
+            frame_time = max(frame_time, last_time)
+            frame_states = build_blank_frame()
             overrides = frame.get("overrides")
             if isinstance(overrides, dict):
                 for key, override in overrides.items():
@@ -272,12 +358,14 @@ class Ws2811LightController:
                     try:
                         pin_str, index_str = key.split(":")
                         pin = int(pin_str)
-                        index = int(index_str)
+                        pixel_index = int(index_str)
                     except (ValueError, TypeError):
                         LOGGER.debug("Invalid override key '%s'; expected 'pin:index'.", key)
                         continue
-                    strip_state = states.get(pin)
-                    if strip_state is None or not (0 <= index < len(strip_state)):
+                    if pin not in frame_states:
+                        continue
+                    strip_len = strip_lengths[pin]
+                    if not (0 <= pixel_index < strip_len):
                         continue
                     is_on = True
                     color_hex = "#ffffff"
@@ -288,45 +376,28 @@ class Ws2811LightController:
                         color_hex = override.get("color", "#ffffff")
                         brightness_value = override.get("brightness", 100)
                     if not is_on:
-                        strip_state[index] = default_state
+                        frame_states[pin][pixel_index] = default_state
                         continue
-                    base_r, base_g, base_b = self._hex_to_rgb(str(color_hex))
-                    try:
-                        brightness_pct = float(brightness_value)
-                    except (TypeError, ValueError):
-                        brightness_pct = 100.0
+                    base_r, base_g, base_b = self._controller._hex_to_rgb(str(color_hex))
+                    brightness_pct = self._safe_float(brightness_value, 100.0)
                     brightness_pct = max(0.0, min(100.0, brightness_pct))
                     factor = brightness_pct / 100.0
-                    red = self._clamp_byte(base_r * factor)
-                    green = self._clamp_byte(base_g * factor)
-                    blue = self._clamp_byte(base_b * factor)
-                    strip_state[index] = self._encode_color(red, green, blue)
+                    red = self._controller._clamp_byte(base_r * factor)
+                    green = self._controller._clamp_byte(base_g * factor)
+                    blue = self._controller._clamp_byte(base_b * factor)
+                    frame_states[pin][pixel_index] = self._controller._encode_color(red, green, blue)
 
-            for config in strips:
-                strip = self._strip_by_pin.get(config.pin)
-                if strip is None:
-                    continue
-                strip_state = states.get(config.pin)
-                if strip_state is None:
-                    continue
-                for idx, encoded_color in enumerate(strip_state):
-                    if idx >= strip.numPixels():
-                        break
-                    strip.setPixelColor(idx, encoded_color)
-                strip.show()
+            frames.append(frame_states)
 
-            frame_index += 1
-            current_time = frame_time
-            deadline = start_time + current_time
-            now = time.monotonic()
-            if deadline > now:
-                time.sleep(deadline - now)
+            if index + 1 < len(sorted_keyframes):
+                next_time = self._safe_float(sorted_keyframes[index + 1].get("time", frame_time), frame_time)
+            else:
+                next_time = max(duration, frame_time + minimum_step)
+            frame_duration = max(minimum_step, next_time - frame_time)
+            durations.append(frame_duration)
+            last_time = frame_time
 
-    def _apply_all_on_white(self) -> None:
-        for strip in self._strips:
-            for idx in range(strip.numPixels()):
-                strip.setPixelColor(idx, self._encode_color(255, 255, 255))
-            strip.show()
+        return frames, durations
 
 
 def should_enable_hardware() -> bool:
