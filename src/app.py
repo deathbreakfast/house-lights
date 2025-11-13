@@ -64,6 +64,15 @@ DEFAULT_PATTERN_DEFINITIONS: list[dict[str, object]] = [
         "loop": True,
         "color_cycle": ["#0000ff", "#ffffff"],
     },
+    {
+        "id": "halloween_solid",
+        "name": "Halloween (Solid)",
+        "description": "Alternating orange and purple across every LED.",
+        "frame_rate": 8,
+        "duration": 10,
+        "loop": True,
+        "color_cycle": ["#ff8c00", "#800080"],
+    },
 ]
 
 LEGACY_PATTERN_IDS_TO_REMOVE: set[str] = {"warm_glow", "rainbow_wave"}
