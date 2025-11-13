@@ -229,59 +229,87 @@ class Ws2811LightController:
             LOGGER.exception("Failed sorting keyframes; applying in original order.")
             sorted_keyframes = keyframes
 
-        for frame in sorted_keyframes:
+        frame_rate = pattern_payload.get("frame_rate")
+        try:
+            frame_rate_value = float(frame_rate)
+        except (TypeError, ValueError):
+            frame_rate_value = 8.0
+        frame_rate_value = max(frame_rate_value, 0.1)
+        step_duration = 1.0 / frame_rate_value
+
+        duration_value = pattern_payload.get("duration")
+        try:
+            duration_seconds = float(duration_value)
+        except (TypeError, ValueError):
+            duration_seconds = sorted_keyframes[-1]["time"] if sorted_keyframes else 30.0
+        duration_seconds = max(duration_seconds, step_duration)
+
+        current_time = 0.0
+        start_time = time.monotonic()
+        frame_index = 0
+
+        while current_time <= duration_seconds and frame_index < len(sorted_keyframes):
+            frame = sorted_keyframes[frame_index]
+            frame_time = float(frame.get("time", 0.0))
+            if current_time + 1e-6 < frame_time:
+                current_time = frame_time
             overrides = frame.get("overrides")
-            if not isinstance(overrides, dict):
-                continue
-            for key, override in overrides.items():
-                if not isinstance(key, str):
-                    continue
-                try:
-                    pin_str, index_str = key.split(":")
-                    pin = int(pin_str)
-                    index = int(index_str)
-                except (ValueError, TypeError):
-                    LOGGER.debug("Invalid override key '%s'; expected 'pin:index'.", key)
-                    continue
-                strip_state = states.get(pin)
-                if strip_state is None or not (0 <= index < len(strip_state)):
-                    continue
-                is_on = True
-                if isinstance(override, dict):
-                    if override.get("on") is False:
-                        is_on = False
-                    color_hex = override.get("color", "#ffffff")
-                    brightness_value = override.get("brightness", 100)
-                else:
+            if isinstance(overrides, dict):
+                for key, override in overrides.items():
+                    if not isinstance(key, str):
+                        continue
+                    try:
+                        pin_str, index_str = key.split(":")
+                        pin = int(pin_str)
+                        index = int(index_str)
+                    except (ValueError, TypeError):
+                        LOGGER.debug("Invalid override key '%s'; expected 'pin:index'.", key)
+                        continue
+                    strip_state = states.get(pin)
+                    if strip_state is None or not (0 <= index < len(strip_state)):
+                        continue
+                    is_on = True
                     color_hex = "#ffffff"
                     brightness_value = 100
-                if not is_on:
-                    strip_state[index] = self._encode_color(0, 0, 0)
-                    continue
-                base_r, base_g, base_b = self._hex_to_rgb(str(color_hex))
-                try:
-                    brightness_pct = float(brightness_value)
-                except (TypeError, ValueError):
-                    brightness_pct = 100.0
-                brightness_pct = max(0.0, min(100.0, brightness_pct))
-                factor = brightness_pct / 100.0
-                red = self._clamp_byte(base_r * factor)
-                green = self._clamp_byte(base_g * factor)
-                blue = self._clamp_byte(base_b * factor)
-                strip_state[index] = self._encode_color(red, green, blue)
+                    if isinstance(override, dict):
+                        if override.get("on") is False:
+                            is_on = False
+                        color_hex = override.get("color", "#ffffff")
+                        brightness_value = override.get("brightness", 100)
+                    if not is_on:
+                        strip_state[index] = self._encode_color(0, 0, 0)
+                        continue
+                    base_r, base_g, base_b = self._hex_to_rgb(str(color_hex))
+                    try:
+                        brightness_pct = float(brightness_value)
+                    except (TypeError, ValueError):
+                        brightness_pct = 100.0
+                    brightness_pct = max(0.0, min(100.0, brightness_pct))
+                    factor = brightness_pct / 100.0
+                    red = self._clamp_byte(base_r * factor)
+                    green = self._clamp_byte(base_g * factor)
+                    blue = self._clamp_byte(base_b * factor)
+                    strip_state[index] = self._encode_color(red, green, blue)
 
-        for config in strips:
-            strip = self._strip_by_pin.get(config.pin)
-            if strip is None:
-                continue
-            strip_state = states.get(config.pin)
-            if strip_state is None:
-                continue
-            for idx, encoded_color in enumerate(strip_state):
-                if idx >= strip.numPixels():
-                    break
-                strip.setPixelColor(idx, encoded_color)
-            strip.show()
+                    strip = self._strip_by_pin.get(pin)
+                    if strip is not None and index < strip.numPixels():
+                        strip.setPixelColor(index, strip_state[index])
+
+            for config in strips:
+                strip = self._strip_by_pin.get(config.pin)
+                if strip is None:
+                    continue
+                strip_state = states.get(config.pin)
+                if strip_state is None:
+                    continue
+                strip.show()
+
+            frame_index += 1
+            current_time = frame_time
+            deadline = start_time + current_time
+            now = time.monotonic()
+            if deadline > now:
+                time.sleep(deadline - now)
 
     def _apply_all_on_white(self) -> None:
         for strip in self._strips:
