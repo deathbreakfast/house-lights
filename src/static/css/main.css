@@ -743,7 +743,7 @@ select {
 
 .led-form-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 1rem;
     align-items: center;
 }
@@ -804,6 +804,26 @@ select {
     background: rgba(15, 23, 42, 0.08);
     border: 2px dashed rgb(148 163 184 / 60%);
     box-shadow: none;
+}
+
+.brightness-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.brightness-field input[type="range"] {
+    accent-color: #2563eb;
+}
+
+.brightness-field.is-disabled {
+    color: #94a3b8;
+}
+
+.brightness-field.is-disabled input[type="range"] {
+    accent-color: #94a3b8;
 }
 
 .button-stack {
@@ -1178,6 +1198,18 @@ select {
     .pattern-meta-grid input:focus,
     .pattern-meta-grid textarea:focus {
         outline-color: #60a5fa;
+    }
+
+    .brightness-field {
+        color: #e2e8f0;
+    }
+
+    .brightness-field input[type="range"] {
+        accent-color: #60a5fa;
+    }
+
+    .brightness-field.is-disabled {
+        color: #94a3b8;
     }
 
     .simulator-controls {

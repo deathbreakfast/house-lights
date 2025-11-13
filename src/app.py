@@ -44,43 +44,10 @@ DEFAULT_PATTERN_DEFINITIONS: list[dict[str, object]] = [
         "frame_rate": 8,
         "duration": 10,
         "loop": True,
-        "strips": [],
-        "keyframes": [
-            {
-                "id": "kf-all-on-0",
-                "time": 0,
-                "overrides": {},
-            }
-        ],
-    },
-    {
-        "id": "warm_glow",
-        "name": "Warm Glow",
-        "description": "Soft warm white fade sequence.",
-        "frame_rate": 8,
-        "duration": 12,
-        "loop": True,
-        "strips": [],
-        "keyframes": [
-            {"id": "kf-warm-0", "time": 0, "overrides": {}},
-            {"id": "kf-warm-6", "time": 6, "overrides": {}},
-        ],
-    },
-    {
-        "id": "rainbow_wave",
-        "name": "Rainbow Wave",
-        "description": "Cycle through rainbow colors across strips.",
-        "frame_rate": 12,
-        "duration": 15,
-        "loop": True,
-        "strips": [],
-        "keyframes": [
-            {"id": "kf-rainbow-0", "time": 0, "overrides": {}},
-            {"id": "kf-rainbow-5", "time": 5, "overrides": {}},
-            {"id": "kf-rainbow-10", "time": 10, "overrides": {}},
-        ],
     },
 ]
+
+LEGACY_PATTERN_IDS_TO_REMOVE: set[str] = {"warm_glow", "rainbow_wave"}
 
 LOGGER = logging.getLogger(__name__)
 
@@ -253,19 +220,29 @@ def create_app() -> Flask:
             abort(404, description="Invalid pattern identifier.")
         return _pattern_dir() / f"{pattern_id}.json"
 
-    def _load_pattern_file(pattern_id: str) -> dict:
+    def _load_pattern_payload(pattern_id: str) -> dict | None:
         path = _pattern_path(pattern_id)
         if not path.exists():
-            abort(404, description=f"Pattern '{pattern_id}' not found.")
+            return None
         try:
             with path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
         except json.JSONDecodeError as exc:
             LOGGER.error("Failed to parse pattern file %s: %s", path, exc)
-            abort(500, description=f"Pattern file '{pattern_id}' is corrupted.")
+            return None
         keyframes = payload.get("keyframes")
         if isinstance(keyframes, list):
-            keyframes.sort(key=lambda item: item.get("time", 0))
+            try:
+                keyframes.sort(key=lambda item: item.get("time", 0) or 0)
+            except Exception:  # pragma: no cover - defensive
+                LOGGER.exception("Failed to sort keyframes for %s", pattern_id)
+        payload["id"] = payload.get("id") or pattern_id
+        return payload
+
+    def _load_pattern_file(pattern_id: str) -> dict:
+        payload = _load_pattern_payload(pattern_id)
+        if payload is None:
+            abort(404, description=f"Pattern '{pattern_id}' not found.")
         return payload
         return payload
 
@@ -437,37 +414,110 @@ def create_app() -> Flask:
             return False
         return (_pattern_dir() / f"{pattern_id}.json").exists()
 
+    def _remove_legacy_patterns() -> None:
+        for legacy_id in LEGACY_PATTERN_IDS_TO_REMOVE:
+            path = _pattern_dir() / f"{legacy_id}.json"
+            if path.exists():
+                try:
+                    path.unlink()
+                    LOGGER.info("Removed legacy pattern file %s", path)
+                except OSError:
+                    LOGGER.warning("Unable to remove legacy pattern file %s", path)
+
     def _ensure_default_patterns() -> None:
-        existing_files = list(_pattern_dir().glob("*.json"))
-        if existing_files:
-            return
+        physical_strips: list[LightStripConfig] = app.config.get("STRIP_CONFIGS", [])
+        if physical_strips:
+            strip_templates = physical_strips
+            simulated_flag = False
+        else:
+            strip_templates = [
+                LightStripConfig(
+                    pin=pin,
+                    led_count=MAX_LED_COUNT_PER_STRIP,
+                    name=f"Simulated Strip {index + 1}",
+                )
+                for index, pin in enumerate(SIMULATOR_PIN_POOL)
+            ]
+            simulated_flag = True
+
         for definition in DEFAULT_PATTERN_DEFINITIONS:
             pattern_id = definition.get("id") or uuid4().hex
-            keyframes: list[dict] = []
-            for frame in definition.get("keyframes", []):
-                keyframes.append(
-                    {
-                        "id": frame.get("id") or f"kf-{uuid4().hex[:8]}",
-                        "time": float(frame.get("time", 0.0)),
-                        "overrides": frame.get("overrides", {}),
-                    }
-                )
-            keyframes.sort(key=lambda item: item["time"])
             metadata = definition.get("metadata") or {}
             description = definition.get("description")
             if description and "description" not in metadata:
                 metadata = {**metadata, "description": description}
+
+            overrides: dict[str, dict[str, object]] = {}
+            for template in strip_templates:
+                for index in range(template.led_count):
+                    overrides[f"{template.pin}:{index}"] = {
+                        "on": True,
+                        "color": "#ffffff",
+                        "brightness": 100,
+                    }
+
+            strips_payload = [
+                {
+                    "pin": template.pin,
+                    "led_count": template.led_count,
+                    "name": template.name,
+                    "simulated": simulated_flag,
+                }
+                for template in strip_templates
+            ]
+
+            keyframe_payload = {
+                "id": f"kf-{uuid4().hex[:8]}",
+                "time": 0.0,
+                "overrides": overrides,
+            }
             payload = {
+                "id": pattern_id,
                 "name": definition.get("name", pattern_id),
                 "frame_rate": float(definition.get("frame_rate", 8)),
                 "duration": float(definition.get("duration", 30)),
                 "loop": bool(definition.get("loop", True)),
-                "strips": definition.get("strips", []),
-                "keyframes": keyframes,
+                "strips": strips_payload,
+                "keyframes": [keyframe_payload],
                 "metadata": metadata,
             }
-            _write_pattern_file(pattern_id, payload)
 
+            existing_payload = _load_pattern_payload(pattern_id)
+            needs_update = False
+            if existing_payload is None:
+                needs_update = True
+            else:
+                existing_strips = existing_payload.get("strips") or []
+                if len(existing_strips) != len(strips_payload):
+                    needs_update = True
+                else:
+                    for expected, existing in zip(strips_payload, existing_strips):
+                        if (
+                            expected.get("pin") != existing.get("pin")
+                            or expected.get("led_count") != existing.get("led_count")
+                        ):
+                            needs_update = True
+                            break
+                existing_keyframes = existing_payload.get("keyframes") or []
+                expected_keys = set(overrides.keys())
+                if not needs_update:
+                    if len(existing_keyframes) != 1:
+                        needs_update = True
+                    else:
+                        existing_overrides = existing_keyframes[0].get("overrides") or {}
+                        if set(existing_overrides.keys()) != expected_keys:
+                            needs_update = True
+                        else:
+                            for key in expected_keys:
+                                existing_entry = existing_overrides.get(key) or {}
+                                if existing_entry.get("color") != "#ffffff" or existing_entry.get("on") is False:
+                                    needs_update = True
+                                    break
+                if not needs_update:
+                    continue
+
+            _write_pattern_file(pattern_id, payload)
+    _remove_legacy_patterns()
     _ensure_default_patterns()
     _refresh_pattern_cache()
 
@@ -517,7 +567,16 @@ def create_app() -> Flask:
             LOGGER.warning("No pattern selected; unable to apply lighting pattern.")
             return
         LOGGER.info("Applying pattern: %s", pattern_id)
-        controller.apply_pattern(pattern_id)
+        pattern_payload = _load_pattern_payload(pattern_id)
+        if pattern_payload is not None:
+            strips = _active_strip_configs()
+            controller.render_pattern(pattern_payload, strips)
+        else:
+            LOGGER.warning(
+                "Pattern payload for '%s' not found; falling back to legacy controller apply.",
+                pattern_id,
+            )
+            controller.apply_pattern(pattern_id)
 
     def _set_light_power(is_on: bool) -> None:
         """Update in-memory light power state and notify the controller."""

@@ -34,6 +34,9 @@ class LightController(Protocol):
     def apply_pattern(self, pattern_id: str) -> None:
         """Activate the given lighting pattern."""
 
+    def render_pattern(self, pattern_payload: dict, strips: list["LightStripConfig"]) -> None:
+        """Render a rich pattern definition onto the configured strips."""
+
     def set_pixel_test(
         self, strip_pin: int, pixel_index: int, color: tuple[int, int, int] | None
     ) -> None:
@@ -59,6 +62,16 @@ class NoopLightController:
             "NoopLightController.apply_pattern called with pattern=%s; strips=%s",
             pattern_id,
             self.strip_configs,
+        )
+
+    def render_pattern(
+        self, pattern_payload: dict, strips: list[LightStripConfig]
+    ) -> None:  # pragma: no cover - logging only
+        LOGGER.info(
+            "NoopLightController.render_pattern called with pattern=%s; strips=%s payload_keys=%s",
+            pattern_payload.get("id"),
+            strips,
+            list(pattern_payload.keys()),
         )
 
     def set_pixel_test(
@@ -116,6 +129,30 @@ class Ws2811LightController:
                 "Initialized WS2811 strip: pin=%s, leds=%s, channel=%s", config.pin, config.led_count, channel
             )
 
+    @staticmethod
+    def _clamp_byte(value: float) -> int:
+        return max(0, min(255, int(round(value))))
+
+    @staticmethod
+    def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+        stripped = value.strip().lower()
+        if stripped.startswith("#"):
+            stripped = stripped[1:]
+        if len(stripped) != 6:
+            return (255, 255, 255)
+        try:
+            r = int(stripped[0:2], 16)
+            g = int(stripped[2:4], 16)
+            b = int(stripped[4:6], 16)
+        except ValueError:
+            return (255, 255, 255)
+        return r, g, b
+
+    @staticmethod
+    def _encode_color(red: int, green: int, blue: int) -> int:
+        """Map standard RGB tuples to the hardware's GRB encoding."""
+        return Color(green, red, blue)
+
     def set_power(self, is_on: bool) -> None:
         if is_on:
             LOGGER.info("Powering on lighting; reapplying pattern %s", self._last_pattern)
@@ -125,7 +162,7 @@ class Ws2811LightController:
         LOGGER.info("Powering off lighting; clearing all strips.")
         for strip in self._strips:
             for idx in range(strip.numPixels()):
-                strip.setPixelColor(idx, Color(0, 0, 0))
+                strip.setPixelColor(idx, self._encode_color(0, 0, 0))
             strip.show()
 
     def set_pixel_test(
@@ -150,10 +187,10 @@ class Ws2811LightController:
             return
 
         if color is None:
-            strip.setPixelColor(pixel_index, Color(0, 0, 0))
+            strip.setPixelColor(pixel_index, self._encode_color(0, 0, 0))
         else:
             r, g, b = color
-            strip.setPixelColor(pixel_index, Color(r, g, b))
+            strip.setPixelColor(pixel_index, self._encode_color(r, g, b))
         strip.show()
 
     def apply_pattern(self, pattern_id: str) -> None:
@@ -165,10 +202,91 @@ class Ws2811LightController:
         else:
             LOGGER.warning("Pattern %s not implemented for hardware controller.", pattern_id)
 
+    def render_pattern(self, pattern_payload: dict, strips: list[LightStripConfig]) -> None:
+        pattern_id = pattern_payload.get("id") or pattern_payload.get("name") or "<unnamed>"
+        LOGGER.info("Rendering pattern payload %s", pattern_id)
+        self._last_pattern = pattern_id
+
+        if not self._strips:
+            LOGGER.warning("No hardware strips initialized; skipping render.")
+            return
+
+        states: dict[int, list[int]] = {}
+        for config in strips:
+            strip = self._strip_by_pin.get(config.pin)
+            if strip is None:
+                LOGGER.debug("Skipping pattern render for unknown strip pin=%s", config.pin)
+                continue
+            states[config.pin] = [self._encode_color(0, 0, 0) for _ in range(config.led_count)]
+
+        keyframes = pattern_payload.get("keyframes") or []
+        try:
+            sorted_keyframes = sorted(
+                keyframes,
+                key=lambda frame: float(frame.get("time", 0.0)),
+            )
+        except Exception:  # pragma: no cover - defensive
+            LOGGER.exception("Failed sorting keyframes; applying in original order.")
+            sorted_keyframes = keyframes
+
+        for frame in sorted_keyframes:
+            overrides = frame.get("overrides")
+            if not isinstance(overrides, dict):
+                continue
+            for key, override in overrides.items():
+                if not isinstance(key, str):
+                    continue
+                try:
+                    pin_str, index_str = key.split(":")
+                    pin = int(pin_str)
+                    index = int(index_str)
+                except (ValueError, TypeError):
+                    LOGGER.debug("Invalid override key '%s'; expected 'pin:index'.", key)
+                    continue
+                strip_state = states.get(pin)
+                if strip_state is None or not (0 <= index < len(strip_state)):
+                    continue
+                is_on = True
+                if isinstance(override, dict):
+                    if override.get("on") is False:
+                        is_on = False
+                    color_hex = override.get("color", "#ffffff")
+                    brightness_value = override.get("brightness", 100)
+                else:
+                    color_hex = "#ffffff"
+                    brightness_value = 100
+                if not is_on:
+                    strip_state[index] = self._encode_color(0, 0, 0)
+                    continue
+                base_r, base_g, base_b = self._hex_to_rgb(str(color_hex))
+                try:
+                    brightness_pct = float(brightness_value)
+                except (TypeError, ValueError):
+                    brightness_pct = 100.0
+                brightness_pct = max(0.0, min(100.0, brightness_pct))
+                factor = brightness_pct / 100.0
+                red = self._clamp_byte(base_r * factor)
+                green = self._clamp_byte(base_g * factor)
+                blue = self._clamp_byte(base_b * factor)
+                strip_state[index] = self._encode_color(red, green, blue)
+
+        for config in strips:
+            strip = self._strip_by_pin.get(config.pin)
+            if strip is None:
+                continue
+            strip_state = states.get(config.pin)
+            if strip_state is None:
+                continue
+            for idx, encoded_color in enumerate(strip_state):
+                if idx >= strip.numPixels():
+                    break
+                strip.setPixelColor(idx, encoded_color)
+            strip.show()
+
     def _apply_all_on_white(self) -> None:
         for strip in self._strips:
             for idx in range(strip.numPixels()):
-                strip.setPixelColor(idx, Color(255, 255, 255))
+                strip.setPixelColor(idx, self._encode_color(255, 255, 255))
             strip.show()
 
 

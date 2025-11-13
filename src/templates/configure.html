@@ -217,6 +217,18 @@
               <span>Color</span>
               <input type="color" name="led-color" value="#ffffff" data-led-color />
             </label>
+            <label class="brightness-field">
+              <span>Brightness</span>
+              <input
+                type="range"
+                name="led-brightness"
+                min="0"
+                max="100"
+                step="1"
+                value="100"
+                data-led-brightness
+              />
+            </label>
             <div class="button-stack">
               <button type="button" class="primary" data-action="test-led" disabled>Test LED</button>
               <button type="button" data-action="apply-led" disabled>Apply Change</button>

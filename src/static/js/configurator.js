@@ -19,9 +19,11 @@ const zoomOutButton = document.querySelector('[data-action="zoom-out"]');
 const zoomResetButton = document.querySelector('[data-action="zoom-reset"]');
 const ledOnInput = document.querySelector("[data-led-on]");
 const ledColorInput = document.querySelector("[data-led-color]");
+const ledBrightnessInput = document.querySelector("[data-led-brightness]");
 const ledStatusEl = document.querySelector("[data-led-status]");
 const toggleField = document.querySelector(".toggle-field");
 const colorField = document.querySelector(".color-field");
+const brightnessField = document.querySelector(".brightness-field");
 const testButton = document.querySelector('[data-action="test-led"]');
 const applyButton = document.querySelector('[data-action="apply-led"]');
 const timelineSuite = document.querySelector("[data-timeline-suite]");
@@ -115,6 +117,34 @@ function makeLedKey(pin, index) {
 function parseLedKey(key) {
   const [pinPart, indexPart] = key.split(":");
   return { pin: Number(pinPart), index: Number(indexPart) };
+}
+
+function clampByte(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function hexToRgb(hex) {
+  const normalized = hex.trim().replace(/^#/, "");
+  if (normalized.length !== 6) {
+    return { r: 255, g: 255, b: 255 };
+  }
+  const r = parseInt(normalized.slice(0, 2), 16);
+  const g = parseInt(normalized.slice(2, 4), 16);
+  const b = parseInt(normalized.slice(4, 6), 16);
+  return { r, g, b };
+}
+
+function rgbToHex(r, g, b) {
+  return `#${clampByte(r).toString(16).padStart(2, "0")}${clampByte(g)
+    .toString(16)
+    .padStart(2, "0")}${clampByte(b).toString(16).padStart(2, "0")}`;
+}
+
+function applyBrightnessToHex(hex, brightnessPercent) {
+  const brightness = Math.max(0, Math.min(100, Number(brightnessPercent)));
+  const factor = brightness / 100;
+  const { r, g, b } = hexToRgb(hex);
+  return rgbToHex(r * factor, g * factor, b * factor);
 }
 
 async function init() {
@@ -383,6 +413,10 @@ function applyLoadedPattern(pattern, { announce = false } = {}) {
               value && typeof value === "object" && typeof value.color === "string"
                 ? value.color
                 : "#ffffff",
+            brightness:
+              value && typeof value === "object" && typeof value.brightness === "number"
+                ? Math.max(0, Math.min(100, value.brightness))
+                : 100,
           },
         ])
       );
@@ -422,6 +456,10 @@ function serializeKeyframe(frame) {
       {
         on: value?.on !== false,
         color: value?.color ?? "#ffffff",
+        brightness:
+          typeof value?.brightness === "number"
+            ? Math.max(0, Math.min(100, value.brightness))
+            : 100,
       },
     ])
   );
@@ -825,6 +863,8 @@ function renderVisualization() {
   updateSelectedStyling();
   updateVisualizationCursorState();
   updateTimelineDisabled(false);
+  const activeFrame = getActiveKeyframe() || findKeyframeForTime(state.timeline.currentTime);
+  applyKeyframeToVisualization(activeFrame);
 }
 
 function selectLed(pin, index) {
@@ -1053,10 +1093,15 @@ function applyNodeAppearance(node, pin, index) {
     node.style.setProperty("--led-color", "#94a3b8");
     node.setAttribute("data-led-on", "false");
     node.removeAttribute("data-led-color");
+    node.removeAttribute("data-led-brightness");
   } else {
-    node.style.setProperty("--led-color", override.color || "#ffffff");
+    const baseColor = override.color || "#ffffff";
+    const brightness = typeof override.brightness === "number" ? override.brightness : 100;
+    const displayColor = applyBrightnessToHex(baseColor, brightness);
+    node.style.setProperty("--led-color", displayColor);
     node.setAttribute("data-led-on", "true");
-    node.setAttribute("data-led-color", override.color || "#ffffff");
+    node.setAttribute("data-led-color", baseColor);
+    node.setAttribute("data-led-brightness", String(brightness));
   }
 }
 
@@ -1067,11 +1112,17 @@ function updateLedInspector() {
   applyButton.disabled = !hasSelection || state.requestInFlight;
   ledOnInput.disabled = !hasSelection;
   ledColorInput.disabled = !hasSelection;
+  if (ledBrightnessInput) {
+    ledBrightnessInput.disabled = !hasSelection;
+  }
   if (toggleField) {
     toggleField.classList.toggle("is-disabled", !hasSelection);
   }
   if (colorField) {
     colorField.classList.toggle("is-disabled", !hasSelection);
+  }
+  if (brightnessField) {
+    brightnessField.classList.toggle("is-disabled", !hasSelection);
   }
 
   if (!hasSelection) {
@@ -1080,6 +1131,9 @@ function updateLedInspector() {
     ledStatusEl.classList.remove("is-active");
     ledOnInput.checked = true;
     ledColorInput.value = "#ffffff";
+    if (ledBrightnessInput) {
+      ledBrightnessInput.value = "100";
+    }
     return;
   }
 
@@ -1095,6 +1149,10 @@ function updateLedInspector() {
   const override = getLedOverride(pin, index);
   ledOnInput.checked = override ? override.on !== false : true;
   ledColorInput.value = override && override.color ? override.color : "#ffffff";
+  if (ledBrightnessInput) {
+    const brightnessValue = override && typeof override.brightness === "number" ? override.brightness : 100;
+    ledBrightnessInput.value = String(brightnessValue);
+  }
 
   const selectionCount = state.selectedLedKeys.size;
   const labelText =
@@ -1123,6 +1181,9 @@ async function sendLedUpdate(mode) {
 
   const isOn = ledOnInput.checked;
   const color = ledColorInput.value || "#ffffff";
+  const brightnessRaw = ledBrightnessInput ? Number.parseInt(ledBrightnessInput.value, 10) : 100;
+  const brightness = Number.isFinite(brightnessRaw) ? Math.max(0, Math.min(100, brightnessRaw)) : 100;
+  const effectiveColor = isOn ? applyBrightnessToHex(color, brightness) : "#000000";
 
   state.requestInFlight = true;
   state.selectedStripPin = pin;
@@ -1139,7 +1200,7 @@ async function sendLedUpdate(mode) {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
-        body: JSON.stringify({ on: isOn, color }),
+        body: JSON.stringify({ on: isOn, color: effectiveColor }),
       })
     );
     const responses = await Promise.all(requests);
@@ -1154,15 +1215,15 @@ async function sendLedUpdate(mode) {
     sortedIndices.forEach((ledIndex) => {
       const overrideKey = getOverrideKey(pin, ledIndex);
       if (isOn) {
-        state.ledOverrides.set(overrideKey, { on: true, color });
+        state.ledOverrides.set(overrideKey, { on: true, color, brightness });
       } else {
-        state.ledOverrides.set(overrideKey, { on: false, color: "#000000" });
+        state.ledOverrides.set(overrideKey, { on: false, color: "#000000", brightness });
       }
       if (activeKeyframe) {
         if (isOn) {
-          activeKeyframe.overrides.set(overrideKey, { on: true, color });
+          activeKeyframe.overrides.set(overrideKey, { on: true, color, brightness });
         } else {
-          activeKeyframe.overrides.set(overrideKey, { on: false, color: "#000000" });
+          activeKeyframe.overrides.set(overrideKey, { on: false, color: "#000000", brightness });
         }
       }
       const node = state.nodesByKey.get(makeLedKey(pin, ledIndex));
@@ -1543,10 +1604,15 @@ function applyKeyframeToVisualization(frame) {
       node.style.setProperty("--led-color", "#94a3b8");
       node.setAttribute("data-led-on", "false");
       node.removeAttribute("data-led-color");
+      node.removeAttribute("data-led-brightness");
     } else {
-      node.style.setProperty("--led-color", override.color || "#ffffff");
+      const baseColor = override.color || "#ffffff";
+      const brightness = typeof override.brightness === "number" ? override.brightness : 100;
+      const displayColor = applyBrightnessToHex(baseColor, brightness);
+      node.style.setProperty("--led-color", displayColor);
       node.setAttribute("data-led-on", "true");
-      node.setAttribute("data-led-color", override.color || "#ffffff");
+      node.setAttribute("data-led-color", baseColor);
+      node.setAttribute("data-led-brightness", String(brightness));
     }
   });
   updateSelectedStyling();
