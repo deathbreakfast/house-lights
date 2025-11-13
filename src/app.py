@@ -44,6 +44,25 @@ DEFAULT_PATTERN_DEFINITIONS: list[dict[str, object]] = [
         "frame_rate": 8,
         "duration": 10,
         "loop": True,
+        "default_color": "#ffffff",
+    },
+    {
+        "id": "xmas_solid",
+        "name": "X-Mas (Solid)",
+        "description": "Alternating red, green, and blue across every LED.",
+        "frame_rate": 8,
+        "duration": 10,
+        "loop": True,
+        "color_cycle": ["#ff0000", "#00ff00", "#0000ff"],
+    },
+    {
+        "id": "xmas_cool_solid",
+        "name": "X-Mas (Cool, Solid)",
+        "description": "Alternating blue and white across every LED.",
+        "frame_rate": 8,
+        "duration": 10,
+        "loop": True,
+        "color_cycle": ["#0000ff", "#ffffff"],
     },
 ]
 
@@ -440,6 +459,33 @@ def create_app() -> Flask:
             ]
             simulated_flag = True
 
+        def _normalize_hex_color(raw_color: object, fallback: str = "#ffffff") -> str:
+            def _clean(color: str) -> str | None:
+                value = color.strip().lower()
+                if not value:
+                    return None
+                if not value.startswith("#"):
+                    value = f"#{value}"
+                if len(value) != 7:
+                    return None
+                try:
+                    int(value[1:], 16)
+                except ValueError:
+                    return None
+                return value
+
+            default_clean = _clean(fallback) or "#ffffff"
+            if not isinstance(raw_color, str):
+                return default_clean
+            return _clean(raw_color) or default_clean
+
+        def _normalize_brightness(raw_value: object, fallback: int = 100) -> int:
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError):
+                value = fallback
+            return max(0, min(100, value))
+
         for definition in DEFAULT_PATTERN_DEFINITIONS:
             pattern_id = definition.get("id") or uuid4().hex
             metadata = definition.get("metadata") or {}
@@ -447,14 +493,28 @@ def create_app() -> Flask:
             if description and "description" not in metadata:
                 metadata = {**metadata, "description": description}
 
+            default_color = _normalize_hex_color(definition.get("default_color", "#ffffff"))
+            brightness_value = _normalize_brightness(definition.get("brightness", 100))
+
+            color_cycle_raw = definition.get("color_cycle")
+            color_cycle: list[str] = []
+            if isinstance(color_cycle_raw, list):
+                for raw_color in color_cycle_raw:
+                    color_cycle.append(_normalize_hex_color(raw_color, default_color))
+            if not color_cycle:
+                color_cycle = [default_color]
+
+            pixel_counter = 0
             overrides: dict[str, dict[str, object]] = {}
             for template in strip_templates:
                 for index in range(template.led_count):
+                    color_value = color_cycle[pixel_counter % len(color_cycle)]
                     overrides[f"{template.pin}:{index}"] = {
                         "on": True,
-                        "color": "#ffffff",
-                        "brightness": 100,
+                        "color": color_value,
+                        "brightness": brightness_value,
                     }
+                    pixel_counter += 1
 
             strips_payload = [
                 {
@@ -499,18 +559,30 @@ def create_app() -> Flask:
                             needs_update = True
                             break
                 existing_keyframes = existing_payload.get("keyframes") or []
-                expected_keys = set(overrides.keys())
                 if not needs_update:
                     if len(existing_keyframes) != 1:
                         needs_update = True
                     else:
+                        expected_keys = set(overrides.keys())
                         existing_overrides = existing_keyframes[0].get("overrides") or {}
                         if set(existing_overrides.keys()) != expected_keys:
                             needs_update = True
                         else:
                             for key in expected_keys:
                                 existing_entry = existing_overrides.get(key) or {}
-                                if existing_entry.get("color") != "#ffffff" or existing_entry.get("on") is False:
+                                expected_entry = overrides[key]
+                                existing_color = _normalize_hex_color(
+                                    existing_entry.get("color"), expected_entry["color"]
+                                )
+                                existing_on = bool(existing_entry.get("on", True))
+                                existing_brightness = _normalize_brightness(
+                                    existing_entry.get("brightness"), expected_entry["brightness"]
+                                )
+                                if (
+                                    existing_color != expected_entry["color"]
+                                    or existing_on != expected_entry["on"]
+                                    or existing_brightness != expected_entry["brightness"]
+                                ):
                                     needs_update = True
                                     break
                 if not needs_update:
