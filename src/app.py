@@ -1124,7 +1124,7 @@ def create_app() -> Flask:
         pos_x = float(coords.get("x", 400))
         pos_y = float(coords.get("y", 300))
         existing_mode = (existing_row["strip_mode"] if existing_row else None) or "auto"
-        normalized_strip_mode = (strip_mode or existing_mode).lower()
+        normalized_strip_mode = existing_mode.lower()
 
         persisted_ip = ip_address or (existing_row["ip_address"] if existing_row else ip_address)
         persisted_type = device_type or (existing_row["device_type"] if existing_row else device_type)
@@ -2726,9 +2726,11 @@ def create_app() -> Flask:
             updates.append("device_type = ?")
             params.append(data["type"])
         
+        desired_strip_mode: str | None = None
         if "stripMode" in data:
+            desired_strip_mode = str(data["stripMode"]).lower()
             updates.append("strip_mode = ?")
-            params.append(data["stripMode"])
+            params.append(desired_strip_mode)
         
         # Update device properties if any
         if updates:
