@@ -1041,6 +1041,33 @@ def create_app() -> Flask:
         thread.start()
         app.config["HEALTH_POLL_THREAD"] = thread
 
+    def _generate_led_layout(
+        *,
+        led_count: int,
+        strip_index: int,
+        base_x: float,
+        base_y: float,
+        id_prefix: str | None = None,
+    ) -> list[dict[str, object]]:
+        spacing = 18
+        start_x = base_x - max(0, (led_count - 1) * spacing / 2)
+        offset_y = base_y + 60 + strip_index * 30
+        layout: list[dict[str, object]] = []
+        for index in range(led_count):
+            led_id = f"{id_prefix}-led-{index}" if id_prefix else f"led-{uuid4().hex[:8]}"
+            layout.append(
+                {
+                    "id": led_id,
+                    "position": {
+                        "x": start_x + index * spacing,
+                        "y": offset_y,
+                    },
+                    "color": "#ffffff",
+                    "opacity": 1.0,
+                }
+            )
+        return layout
+
     def _persist_device_graph(
         db: sqlite3.Connection,
         *,
@@ -1067,31 +1094,6 @@ def create_app() -> Flask:
 
         pos_x = float(coords.get("x", 400))
         pos_y = float(coords.get("y", 300))
-
-        def _generate_led_layout(
-            *,
-            led_count: int,
-            strip_index: int,
-            base_x: float,
-            base_y: float,
-        ) -> list[dict[str, object]]:
-            spacing = 18
-            start_x = base_x - max(0, (led_count - 1) * spacing / 2)
-            offset_y = base_y + 60 + strip_index * 30
-            layout: list[dict[str, object]] = []
-            for index in range(led_count):
-                layout.append(
-                    {
-                        "id": f"led-{uuid4().hex[:8]}",
-                        "position": {
-                            "x": start_x + index * spacing,
-                            "y": offset_y,
-                        },
-                        "color": "#ffffff",
-                        "opacity": 1.0,
-                    }
-                )
-            return layout
         db.execute(
             """
             INSERT INTO devices (id, scene_id, position_x, position_y, ip_address, device_type, strip_mode)
@@ -1132,6 +1134,7 @@ def create_app() -> Flask:
                     strip_index=strip_index,
                     base_x=pos_x,
                     base_y=pos_y,
+                    id_prefix=f"{device_id}-{strip_id}",
                 )
 
             for led in leds_payload:
@@ -1159,6 +1162,87 @@ def create_app() -> Flask:
                 )
 
         return device_id
+
+    def _ensure_local_device_strips(
+        db: sqlite3.Connection,
+        *,
+        scene_id: str,
+        device_row: sqlite3.Row,
+    ) -> list[dict[str, object]]:
+        env_configs: list[LightStripConfig] = app.config.get("STRIP_CONFIGS", [])
+        if not env_configs:
+            return []
+
+        device_id = device_row["id"]
+        base_x = device_row["position_x"]
+        base_y = device_row["position_y"]
+
+        existing_strip_rows = db.execute(
+            """
+            SELECT id, gpio_pin, led_count FROM led_strips
+            WHERE device_id = ?
+            """,
+            (device_id,),
+        ).fetchall()
+        existing_by_pin = {row["gpio_pin"]: row for row in existing_strip_rows}
+
+        strips_payload: list[dict[str, object]] = []
+
+        for index, config in enumerate(env_configs):
+            strip_row = existing_by_pin.get(config.pin)
+            if strip_row:
+                strip_id = strip_row["id"]
+                if strip_row["led_count"] != config.led_count:
+                    db.execute(
+                        "UPDATE led_strips SET led_count = ? WHERE id = ?",
+                        (config.led_count, strip_id),
+                    )
+            else:
+                strip_id = f"{device_id}-pin-{config.pin}"
+                db.execute(
+                    """
+                    INSERT INTO led_strips (id, device_id, gpio_pin, led_count)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (strip_id, device_id, config.pin, config.led_count),
+                )
+
+            db.execute("DELETE FROM leds WHERE strip_id = ?", (strip_id,))
+            leds_layout = _generate_led_layout(
+                led_count=config.led_count,
+                strip_index=index,
+                base_x=base_x,
+                base_y=base_y,
+                id_prefix=f"{device_id}-{strip_id}",
+            )
+            for led in leds_layout:
+                position = led.get("position", {})
+                db.execute(
+                    """
+                    INSERT INTO leds (id, strip_id, position_x, position_y, color, opacity)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        led.get("id") or f"led-{uuid4().hex}",
+                        strip_id,
+                        float(position.get("x", base_x)),
+                        float(position.get("y", base_y)),
+                        led.get("color", "#ffffff"),
+                        float(led.get("opacity", 1.0)),
+                    ),
+                )
+
+            strips_payload.append(
+                {
+                    "id": strip_id,
+                    "gpioPin": config.pin,
+                    "ledCount": config.led_count,
+                    "leds": leds_layout,
+                }
+            )
+
+        db.commit()
+        return strips_payload
 
     def _update_device_health_metadata(
         device_id: str,
@@ -1854,6 +1938,17 @@ def create_app() -> Flask:
                         for led in leds
                     ],
                 })
+        
+        if (
+            not strips_with_leds
+            and device_row["device_type"] == "local"
+            and app.config.get("IS_CONTROLLER", True)
+        ):
+            strips_with_leds = _ensure_local_device_strips(
+                db,
+                scene_id=scene_id,
+                device_row=device_row,
+            )
             
             health_row = health_map.get(device_id)
             health_payload = None
