@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>House Lights Studio v2</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='v2/dist/main.css') }}" />
+  </head>
+  <body class="bg-[#0f0f0f] text-white">
+    <div id="root"></div>
+    <noscript>
+      <div style="padding: 2rem; text-align: center;">
+        This application requires JavaScript to run.
+      </div>
+    </noscript>
+    <script type="module" src="{{ url_for('static', filename='v2/dist/main.js') }}"></script>
+  </body>
+</html>
+

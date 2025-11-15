@@ -1,0 +1,82 @@
+export type Point = {
+  x: number;
+  y: number;
+};
+
+export type LED = {
+  id: string;
+  position: Point;
+  color: string;
+  opacity: number;
+};
+
+export type LEDStrip = {
+  id: string;
+  gpioPin: number;
+  ledCount: number;
+  leds: LED[];
+};
+
+export type Device = {
+  id: string;
+  position: Point;
+  ipAddress: string;
+  strips: LEDStrip[];
+  type: "local" | "wifi" | "virtual";
+  stripMode: "auto" | "manual"; // Auto uses env variables, manual is user-configured
+};
+
+export type Keyframe = {
+  id: string;
+  timestamp: number;
+  effects: {
+    fadeIn?: number;
+    fadeOut?: number;
+  };
+  ledStates: Record<
+    string,
+    {
+      color: string;
+      opacity: number;
+    }
+  >;
+};
+
+export type Scene = {
+  id: string;
+  name: string;
+  devices: Device[];
+  keyframes: Keyframe[];
+  audioUrl?: string;
+  audioFileName?: string;
+  durationMs?: number;
+  backgroundImage?: string;
+  backgroundImageScale?: number; // Scale as percentage (100 = 100%, 400 = 400%)
+};
+
+export type Tool =
+  | "pan"
+  | "zoom"
+  | "zoom-in"
+  | "zoom-out"
+  | "select"
+  | "group-select"
+  | "add-device"
+  | "paint"
+  | "bucket"
+  | "color-picker"
+  | "eyedropper"
+  | "move";
+
+export type EditorMode = "view" | "edit" | "paint";
+
+export type TooltipPosition = "top" | "right" | "bottom-left" | "bottom";
+
+export type ScenePlaylistEntry = {
+  id: string;
+  sceneId: string;
+  position: number;
+  playDurationSeconds: number;
+  fadeDurationSeconds: number;
+};
+

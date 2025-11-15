@@ -1,0 +1,29 @@
+{
+  "name": "houselights-v2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "clean": "rm -rf dist && mkdir -p dist",
+    "build:css": "npm run clean && tailwindcss -c tailwind.config.js -i src/styles/tailwind.css -o dist/main.css --minify",
+    "build:js": "esbuild src/main.tsx --bundle --format=esm --target=es2017 --sourcemap --outdir=dist --loader:.png=file --loader:.jpg=file --loader:.jpeg=file --loader:.svg=file --loader:.css=css",
+    "build": "npm run build:css && npm run build:js",
+    "test": "vitest run",
+    "dev:css": "tailwindcss -c tailwind.config.js -i src/styles/tailwind.css -o dist/main.css --watch",
+    "dev:js": "esbuild src/main.tsx --bundle --format=esm --target=es2017 --sourcemap --outdir=dist --watch --loader:.png=file --loader:.jpg=file --loader:.jpeg=file --loader:.svg=file --loader:.css=css"
+  },
+  "dependencies": {
+    "framer-motion": "^11.0.15",
+    "lucide-react": "^0.441.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "esbuild": "^0.21.5",
+    "tailwindcss": "^3.4.10",
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.0"
+  }
+}
+
