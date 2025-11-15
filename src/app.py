@@ -1362,7 +1362,7 @@ def create_app() -> Flask:
 
             if should_refresh_leds and isinstance(leds_payload, list):
                 db.execute("DELETE FROM leds WHERE strip_id = ?", (strip_id,))
-            for led in leds_payload:
+                for led in leds_payload:
                     led_id = led.get("id") or f"led-{uuid4().hex}"
                     led_position = led.get("position", {})
                     db.execute(
