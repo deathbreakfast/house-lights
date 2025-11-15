@@ -1052,9 +1052,46 @@ def create_app() -> Flask:
         strip_mode: str = "auto",
         strips: list[dict[str, object]] | None = None,
     ) -> None:
-        coords = position or {"x": 400, "y": 300}
+        existing_row = db.execute(
+            "SELECT position_x, position_y FROM devices WHERE id = ?",
+            (device_id,),
+        ).fetchone()
+
+        if position is None and existing_row:
+            coords = {
+                "x": existing_row["position_x"],
+                "y": existing_row["position_y"],
+            }
+        else:
+            coords = position or {"x": 400, "y": 300}
+
         pos_x = float(coords.get("x", 400))
         pos_y = float(coords.get("y", 300))
+
+        def _generate_led_layout(
+            *,
+            led_count: int,
+            strip_index: int,
+            base_x: float,
+            base_y: float,
+        ) -> list[dict[str, object]]:
+            spacing = 18
+            start_x = base_x - max(0, (led_count - 1) * spacing / 2)
+            offset_y = base_y + 60 + strip_index * 30
+            layout: list[dict[str, object]] = []
+            for index in range(led_count):
+                layout.append(
+                    {
+                        "id": f"led-{uuid4().hex[:8]}",
+                        "position": {
+                            "x": start_x + index * spacing,
+                            "y": offset_y,
+                        },
+                        "color": "#ffffff",
+                        "opacity": 1.0,
+                    }
+                )
+            return layout
         db.execute(
             """
             INSERT INTO devices (id, scene_id, position_x, position_y, ip_address, device_type, strip_mode)
@@ -1076,7 +1113,7 @@ def create_app() -> Flask:
         if not strips:
             return
 
-        for strip in strips:
+        for strip_index, strip in enumerate(strips):
             strip_id = strip.get("id") or f"strip-{uuid4().hex}"
             gpio_pin = int(strip.get("gpioPin", 18))
             led_count = int(strip.get("ledCount", 10))
@@ -1088,7 +1125,16 @@ def create_app() -> Flask:
                 (strip_id, device_id, gpio_pin, led_count),
             )
 
-            for led in strip.get("leds", []) or []:
+            leds_payload = strip.get("leds")
+            if not isinstance(leds_payload, list) or not leds_payload:
+                leds_payload = _generate_led_layout(
+                    led_count=led_count,
+                    strip_index=strip_index,
+                    base_x=pos_x,
+                    base_y=pos_y,
+                )
+
+            for led in leds_payload:
                 led_id = led.get("id") or f"led-{uuid4().hex}"
                 led_position = led.get("position", {})
                 db.execute(
