@@ -736,6 +736,38 @@ def create_app() -> Flask:
             return parsed
         return []
 
+    def _load_auto_strip_snapshot(
+        db: sqlite3.Connection, device_id: str
+    ) -> list[dict[str, object]] | None:
+        health_row = db.execute(
+            "SELECT metadata FROM device_health WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if health_row:
+            metadata = _safe_json_dict(health_row["metadata"])
+            last_meta = metadata.get("lastMeta")
+            if isinstance(last_meta, dict):
+                strips_payload = last_meta.get("strips")
+                if isinstance(strips_payload, list) and strips_payload:
+                    return strips_payload
+
+        handshake_row = db.execute(
+            """
+            SELECT strip_summary
+            FROM device_handshakes
+            WHERE device_id = ? AND status = 'success'
+            ORDER BY responded_at DESC
+            LIMIT 1
+            """,
+            (device_id,),
+        ).fetchone()
+        if handshake_row:
+            strips_payload = _safe_json_list(handshake_row["strip_summary"])
+            if strips_payload:
+                return strips_payload  # type: ignore[return-value]
+
+        return None
+
     def _device_identity_payload() -> dict[str, object]:
         device_id = os.getenv("HOUSE_LIGHTS_DEVICE_ID") or socket.gethostname()
         hardware_id = os.getenv("HOUSE_LIGHTS_HARDWARE_ID") or device_id
@@ -1281,11 +1313,13 @@ def create_app() -> Flask:
         existing_by_pin = {row["gpio_pin"]: row for row in existing_strip_rows}
 
         strips_payload: list[dict[str, object]] = []
+        tracked_ids: set[str] = set()
 
         for index, config in enumerate(env_configs):
             strip_row = existing_by_pin.get(config.pin)
             if strip_row:
                 strip_id = strip_row["id"]
+                tracked_ids.add(strip_id)
                 if strip_row["led_count"] != config.led_count:
                     db.execute(
                         "UPDATE led_strips SET led_count = ? WHERE id = ?",
@@ -1293,6 +1327,7 @@ def create_app() -> Flask:
                     )
             else:
                 strip_id = f"{device_id}-pin-{config.pin}"
+                tracked_ids.add(strip_id)
                 db.execute(
                     """
                     INSERT INTO led_strips (id, device_id, gpio_pin, led_count)
@@ -1334,6 +1369,11 @@ def create_app() -> Flask:
                     "leds": leds_layout,
                 }
             )
+
+        existing_ids = {row["id"] for row in existing_strip_rows}
+        for strip_id in existing_ids - tracked_ids:
+            db.execute("DELETE FROM leds WHERE strip_id = ?", (strip_id,))
+            db.execute("DELETE FROM led_strips WHERE id = ?", (strip_id,))
 
         db.commit()
         return strips_payload
@@ -2037,6 +2077,7 @@ def create_app() -> Flask:
             not strips_with_leds
             and device_row["device_type"] == "local"
             and app.config.get("IS_CONTROLLER", True)
+            and (device_row["strip_mode"] or "auto").lower() == "auto"
         ):
             strips_with_leds = _ensure_local_device_strips(
                 db,
@@ -2709,9 +2750,20 @@ def create_app() -> Flask:
             abort(400, description="Device data required")
         
         db = get_db(app)
+
+        device_snapshot_before = db.execute(
+            """
+            SELECT scene_id, position_x, position_y, ip_address, device_type, strip_mode
+            FROM devices
+            WHERE id = ?
+            """,
+            (device_id,),
+        ).fetchone()
+        if device_snapshot_before is None:
+            abort(404, description="Device not found")
         
         updates = []
-        params = []
+        params: list[object] = []
         
         if "position" in data:
             updates.append("position_x = ?")
@@ -2798,6 +2850,58 @@ def create_app() -> Flask:
                     )
             db.commit()
         
+        device_snapshot_after = db.execute(
+            """
+            SELECT scene_id, position_x, position_y, ip_address, device_type, strip_mode
+            FROM devices
+            WHERE id = ?
+            """,
+            (device_id,),
+        ).fetchone()
+
+        if desired_strip_mode and device_snapshot_after:
+            if desired_strip_mode == "auto":
+                auto_seeded = False
+                if (
+                    device_snapshot_after["device_type"] == "local"
+                    and app.config.get("IS_CONTROLLER", True)
+                ):
+                    strips_payload = _ensure_local_device_strips(
+                        db,
+                        scene_id=device_snapshot_after["scene_id"],
+                        device_row=device_snapshot_after,
+                    )
+                    auto_seeded = bool(strips_payload)
+                else:
+                    auto_snapshot = _load_auto_strip_snapshot(db, device_id)
+                    if auto_snapshot:
+                        _persist_device_graph(
+                            db,
+                            device_id=device_id,
+                            scene_id=device_snapshot_after["scene_id"],
+                            ip_address=device_snapshot_after["ip_address"],
+                            position={
+                                "x": device_snapshot_after["position_x"],
+                                "y": device_snapshot_after["position_y"],
+                            },
+                            device_type=device_snapshot_after["device_type"],
+                            strip_mode="auto",
+                            strips=auto_snapshot,
+                        )
+                        db.commit()
+                        auto_seeded = True
+                if not auto_seeded:
+                    LOGGER.warning(
+                        "Unable to refresh auto strips for device %s; no metadata available.",
+                        device_id,
+                    )
+
+            _send_ws_command(
+                command="strip_mode",
+                payload={"deviceId": device_id, "mode": desired_strip_mode},
+                device_ids=[device_id],
+            )
+
         return jsonify({"id": device_id})
     
     def _serialize_keyframe_row(row: sqlite3.Row) -> dict[str, object]:
