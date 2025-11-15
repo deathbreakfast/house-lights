@@ -301,6 +301,9 @@ def create_app() -> Flask:
     app.config["SIMULATED_STRIPS"]: list[LightStripConfig] = []
     app.config["SIMULATED_STRIPS_BY_PIN"]: dict[int, LightStripConfig] = {}
     app.config["SYSTEMD_SERVICE_NAME"] = systemd_service_name
+    app.config["LOCAL_DEVICE_ID_PREFIX"] = (
+        os.getenv("HOUSE_LIGHTS_CONTROLLER_DEVICE_ID") or "controller-local"
+    )
     
     # Initialize database (controller only)
     if is_controller:
@@ -768,6 +771,46 @@ def create_app() -> Flask:
 
         return None
 
+    def _local_device_id_for_scene(scene_id: str) -> str:
+        prefix = app.config.get("LOCAL_DEVICE_ID_PREFIX", "controller-local")
+        safe_scene = scene_id or "default"
+        return f"{prefix}-{safe_scene}"
+
+    def _seed_local_device_for_scene(db: sqlite3.Connection, scene_id: str) -> None:
+        if not app.config.get("IS_CONTROLLER", True):
+            return
+        env_configs: list[LightStripConfig] = app.config.get("STRIP_CONFIGS", [])
+        if not env_configs:
+            return
+
+        device_id = _local_device_id_for_scene(scene_id)
+        existing = db.execute(
+            "SELECT id FROM devices WHERE id = ?", (device_id,)
+        ).fetchone()
+        if existing:
+            return
+
+        ip_address = os.getenv("HOUSE_LIGHTS_DEVICE_IP") or "127.0.0.1"
+        strips_payload = [
+            {
+                "id": f"{device_id}-pin-{config.pin}",
+                "gpioPin": config.pin,
+                "ledCount": config.led_count,
+            }
+            for config in env_configs
+        ]
+        _persist_device_graph(
+            db,
+            device_id=device_id,
+            scene_id=scene_id,
+            ip_address=ip_address,
+            position={"x": 400, "y": 300},
+            device_type="local",
+            strip_mode="auto",
+            strips=strips_payload,
+        )
+        db.commit()
+
     def _device_identity_payload() -> dict[str, object]:
         device_id = os.getenv("HOUSE_LIGHTS_DEVICE_ID") or socket.gethostname()
         hardware_id = os.getenv("HOUSE_LIGHTS_HARDWARE_ID") or device_id
@@ -1155,7 +1198,9 @@ def create_app() -> Flask:
 
         pos_x = float(coords.get("x", 400))
         pos_y = float(coords.get("y", 300))
-        existing_mode = (existing_row["strip_mode"] if existing_row else None) or "auto"
+        existing_mode = (
+            existing_row["strip_mode"] if existing_row else (strip_mode or "auto")
+        )
         normalized_strip_mode = existing_mode.lower()
 
         persisted_ip = ip_address or (existing_row["ip_address"] if existing_row else ip_address)
@@ -2003,6 +2048,7 @@ def create_app() -> Flask:
     def get_scene_devices(scene_id: str):
         """Get all devices for a scene."""
         db = get_db(app)
+        _seed_local_device_for_scene(db, scene_id)
         devices = db.execute(
             """
             SELECT id, position_x, position_y, ip_address, device_type, strip_mode
