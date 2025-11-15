@@ -275,6 +275,7 @@ def create_app() -> Flask:
             logging.getLogger().addHandler(rotating_handler)
             LOGGER.info("File logging enabled at %s", candidate)
             log_path_obj = candidate
+            app.config["FILE_LOG_HANDLER"] = rotating_handler
             break
         except PermissionError:
             LOGGER.warning(
@@ -304,6 +305,13 @@ def create_app() -> Flask:
     app.config["LOCAL_DEVICE_ID_PREFIX"] = (
         os.getenv("HOUSE_LIGHTS_CONTROLLER_DEVICE_ID") or "controller-local"
     )
+    verbose_device_logs = _env_flag("HOUSE_LIGHTS_VERBOSE_DEVICE_LOGS", False)
+    app.config["VERBOSE_DEVICE_LOGS"] = verbose_device_logs
+    if verbose_device_logs and logging.getLogger().level > logging.DEBUG:
+        logging.getLogger().setLevel(logging.DEBUG)
+    file_handler = app.config.get("FILE_LOG_HANDLER")
+    if file_handler:
+        file_handler.setLevel(logging.getLogger().level)
     
     # Initialize database (controller only)
     if is_controller:
@@ -739,6 +747,18 @@ def create_app() -> Flask:
             return parsed
         return []
 
+    def _log_device_debug(message: str, **details: object) -> None:
+        if not app.config.get("VERBOSE_DEVICE_LOGS"):
+            return
+        if details:
+            try:
+                serialized = json.dumps(details, default=str)
+            except TypeError:
+                serialized = str(details)
+            LOGGER.debug("%s | %s", message, serialized)
+        else:
+            LOGGER.debug(message)
+
     def _load_auto_strip_snapshot(
         db: sqlite3.Connection, device_id: str
     ) -> list[dict[str, object]] | None:
@@ -790,6 +810,12 @@ def create_app() -> Flask:
         if existing:
             return
 
+        _log_device_debug(
+            "Seeding controller device for scene",
+            scene_id=scene_id,
+            device_id=device_id,
+            strip_count=len(env_configs),
+        )
         ip_address = os.getenv("HOUSE_LIGHTS_DEVICE_IP") or "127.0.0.1"
         strips_payload = [
             {
@@ -1074,6 +1100,13 @@ def create_app() -> Flask:
                     "y": device_row["position_y"],
                 }
                 try:
+                    _log_device_debug(
+                        "Reconciling device from metadata poll",
+                        device_id=device_id,
+                        scene_id=device_row["scene_id"],
+                        strip_mode=device_row["strip_mode"],
+                        incoming_strips=len(meta_payload.get("strips") or []),
+                    )
                     _persist_device_graph(
                         db,
                         device_id=device_id,
@@ -1202,6 +1235,14 @@ def create_app() -> Flask:
             existing_row["strip_mode"] if existing_row else (strip_mode or "auto")
         )
         normalized_strip_mode = existing_mode.lower()
+        _log_device_debug(
+            "Persist device graph",
+            device_id=device_id,
+            scene_id=scene_id,
+            device_type=device_type,
+            incoming_strip_count=len(strips or []),
+            normalized_strip_mode=normalized_strip_mode,
+        )
 
         persisted_ip = ip_address or (existing_row["ip_address"] if existing_row else ip_address)
         persisted_type = device_type or (existing_row["device_type"] if existing_row else device_type)
@@ -1223,6 +1264,11 @@ def create_app() -> Flask:
         )
 
         if normalized_strip_mode == "manual":
+            _log_device_debug(
+                "Persist skip (manual mode)",
+                device_id=device_id,
+                scene_id=scene_id,
+            )
             return
 
         incoming_strips = strips or []
@@ -1269,6 +1315,13 @@ def create_app() -> Flask:
                     (strip_id, device_id, gpio_pin, led_count),
                 )
                 target_row = {"id": strip_id, "gpio_pin": gpio_pin, "led_count": led_count}
+                _log_device_debug(
+                    "Created strip",
+                    device_id=device_id,
+                    strip_id=strip_id,
+                    gpio_pin=gpio_pin,
+                    led_count=led_count,
+                )
 
             seen_strip_ids.add(strip_id)
             metadata_changed = False
@@ -1290,6 +1343,13 @@ def create_app() -> Flask:
             should_refresh_leds = False
             if isinstance(leds_payload, list) and leds_payload:
                 should_refresh_leds = True
+                _log_device_debug(
+                    "Strip metadata changed",
+                    device_id=device_id,
+                    strip_id=strip_id,
+                    gpio_pin=gpio_pin,
+                    led_count=led_count,
+                )
             elif metadata_changed:
                 should_refresh_leds = True
                 leds_payload = _generate_led_layout(
@@ -1302,7 +1362,7 @@ def create_app() -> Flask:
 
             if should_refresh_leds and isinstance(leds_payload, list):
                 db.execute("DELETE FROM leds WHERE strip_id = ?", (strip_id,))
-                for led in leds_payload:
+            for led in leds_payload:
                     led_id = led.get("id") or f"led-{uuid4().hex}"
                     led_position = led.get("position", {})
                     db.execute(
@@ -1331,6 +1391,11 @@ def create_app() -> Flask:
         for strip_id in to_remove:
             db.execute("DELETE FROM leds WHERE strip_id = ?", (strip_id,))
             db.execute("DELETE FROM led_strips WHERE id = ?", (strip_id,))
+            _log_device_debug(
+                "Removed strip",
+                device_id=device_id,
+                strip_id=strip_id,
+            )
 
         return device_id
 
@@ -1347,6 +1412,12 @@ def create_app() -> Flask:
         device_id = device_row["id"]
         base_x = device_row["position_x"]
         base_y = device_row["position_y"]
+        _log_device_debug(
+            "Seeding local device strips",
+            scene_id=scene_id,
+            device_id=device_id,
+            strip_count=len(env_configs),
+        )
 
         existing_strip_rows = db.execute(
             """
@@ -2058,6 +2129,12 @@ def create_app() -> Flask:
             """,
             (scene_id,),
         ).fetchall()
+        _log_device_debug(
+            "Devices query",
+            scene_id=scene_id,
+            count=len(devices),
+            device_ids=[row["id"] for row in devices],
+        )
         device_ids = [device_row["id"] for device_row in devices]
         health_map: dict[str, sqlite3.Row] = {}
         if device_ids:
@@ -2130,40 +2207,59 @@ def create_app() -> Flask:
                 scene_id=scene_id,
                 device_row=device_row,
             )
-            
-            health_row = health_map.get(device_id)
-            health_payload = None
-            if health_row:
-                metadata = _safe_json_dict(health_row["metadata"])
-                last_seen_at = health_row["last_seen_at"]
-                parsed_seen = _parse_db_timestamp(last_seen_at)
-                is_online = False
-                if parsed_seen:
-                    age = (datetime.now(timezone.utc) - parsed_seen).total_seconds()
-                    is_online = age <= app.config.get("DEVICE_HEALTH_MAX_AGE_SECONDS", 45)
-                health_payload = {
-                    "online": is_online,
-                    "lastSeenAt": last_seen_at,
-                    "latencyMs": health_row["last_latency_ms"],
-                    "clockSkewMs": health_row["clock_skew_ms"],
-                    "wsConnected": bool(health_row["ws_connected"]),
-                    "playlistHash": health_row["playlist_hash"],
-                    "metadata": metadata,
-                }
 
-            result.append({
-                "id": device_id,
-                "position": {
-                    "x": device_row["position_x"],
-                    "y": device_row["position_y"],
-                },
-                "ipAddress": device_row["ip_address"],
-                "type": device_row["device_type"],
-                "stripMode": device_row["strip_mode"],
-                "strips": strips_with_leds,
-                "health": health_payload,
-            })
-        
+        health_row = health_map.get(device_id)
+        health_payload = None
+        if health_row:
+            metadata = _safe_json_dict(health_row["metadata"])
+            last_seen_at = health_row["last_seen_at"]
+            parsed_seen = _parse_db_timestamp(last_seen_at)
+            is_online = False
+            if parsed_seen:
+                age = (datetime.now(timezone.utc) - parsed_seen).total_seconds()
+                is_online = age <= app.config.get("DEVICE_HEALTH_MAX_AGE_SECONDS", 45)
+            health_payload = {
+                "online": is_online,
+                "lastSeenAt": last_seen_at,
+                "latencyMs": health_row["last_latency_ms"],
+                "clockSkewMs": health_row["clock_skew_ms"],
+                "wsConnected": bool(health_row["ws_connected"]),
+                "playlistHash": health_row["playlist_hash"],
+                "metadata": metadata,
+            }
+
+        result.append({
+            "id": device_id,
+            "position": {
+                "x": device_row["position_x"],
+                "y": device_row["position_y"],
+            },
+            "ipAddress": device_row["ip_address"],
+            "type": device_row["device_type"],
+            "stripMode": device_row["strip_mode"],
+            "strips": strips_with_leds,
+            "health": health_payload,
+        })
+        _log_device_debug(
+            "Appended device to scene payload",
+            device_id=device_id,
+            strip_count=len(strips_with_leds),
+        )
+    
+        _log_device_debug(
+            "Scene devices response",
+            scene_id=scene_id,
+            devices=[
+                {
+                    "id": item["id"],
+                    "position": item["position"],
+                    "stripMode": item["stripMode"],
+                    "stripCount": len(item["strips"]),
+                }
+                for item in result
+            ],
+        )
+
         return jsonify(result)
 
     @app.get("/api/device/meta")
@@ -2221,6 +2317,11 @@ def create_app() -> Flask:
         data = request.get_json()
         if not data:
             abort(400, description="Device data required")
+        _log_device_debug(
+            "Create device request",
+            scene_id=scene_id,
+            payload=data,
+        )
         
         device_id = data.get("id") or str(uuid4())
         position = data.get("position", {"x": 400, "y": 300})
@@ -2414,6 +2515,12 @@ def create_app() -> Flask:
         db.commit()
 
         if error_message is not None:
+            _log_device_debug(
+                "Handshake failed",
+                scene_id=scene_id,
+                ip_address=ip_address,
+                error=error_message,
+            )
             return (
                 jsonify(
                     {
@@ -2445,6 +2552,14 @@ def create_app() -> Flask:
             "health": health_payload,
             "strips": strips_payload,
         }
+        _log_device_debug(
+            "Handshake success",
+            scene_id=scene_id,
+            device_id=persisted_id,
+            ip_address=ip_address,
+            latency_ms=latency_ms,
+            strip_count=len(strips_payload),
+        )
         return jsonify(response_payload), 201
 
     @app.get("/api/v2/devices/<device_id>/status")
@@ -2807,6 +2922,11 @@ def create_app() -> Flask:
         ).fetchone()
         if device_snapshot_before is None:
             abort(404, description="Device not found")
+        _log_device_debug(
+            "Update device request",
+            device_id=device_id,
+            payload=data,
+        )
         
         updates = []
         params: list[object] = []
@@ -2946,6 +3066,11 @@ def create_app() -> Flask:
                 command="strip_mode",
                 payload={"deviceId": device_id, "mode": desired_strip_mode},
                 device_ids=[device_id],
+            )
+            _log_device_debug(
+                "Strip mode updated",
+                device_id=device_id,
+                mode=desired_strip_mode,
             )
 
         return jsonify({"id": device_id})
@@ -3165,6 +3290,11 @@ def create_app() -> Flask:
         leds = data.get("leds")
         if not isinstance(leds, list) or not leds:
             abort(400, description="leds array is required.")
+        _log_device_debug(
+            "Bulk LED update",
+            device_id=device_id,
+            led_count=len(leds),
+        )
         db = get_db(app)
         updates = 0
         for led_update in leds:

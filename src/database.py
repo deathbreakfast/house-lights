@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from flask import Flask, g
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def get_db(app: Flask) -> sqlite3.Connection:
@@ -18,7 +21,7 @@ def get_db(app: Flask) -> sqlite3.Connection:
             db_dir = Path.home() / ".houselights"
             db_dir.mkdir(parents=True, exist_ok=True)
             db_path = db_dir / "houselights_v2.db"
-        
+        logger.debug("Opening database connection at %s", db_path)
         g.db = sqlite3.connect(str(db_path), check_same_thread=False)
         g.db.row_factory = sqlite3.Row
         _init_db(g.db)
