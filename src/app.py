@@ -983,6 +983,35 @@ def create_app() -> Flask:
             ws_connected=None,
         )
 
+        if meta_payload and isinstance(meta_payload, dict):
+            db = get_db(app)
+            device_row = db.execute(
+                """
+                SELECT scene_id, position_x, position_y, device_type, strip_mode, ip_address
+                FROM devices
+                WHERE id = ?
+                """,
+                (device_id,),
+            ).fetchone()
+            if device_row:
+                position_payload = {
+                    "x": device_row["position_x"],
+                    "y": device_row["position_y"],
+                }
+                try:
+                    _persist_device_graph(
+                        db,
+                        device_id=device_id,
+                        scene_id=device_row["scene_id"],
+                        ip_address=device_row["ip_address"] or ip_address,
+                        position=position_payload,
+                        device_type=device_row["device_type"],
+                        strip_mode=meta_payload.get("stripMode") or device_row["strip_mode"],
+                        strips=meta_payload.get("strips"),
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    LOGGER.exception("Failed to reconcile strips for device %s during health poll.", device_id)
+
         clock_skew_ms = None
         remote_unix = health_payload.get("unixTimeMs") if isinstance(health_payload, dict) else None
         if isinstance(remote_unix, (int, float)):
@@ -1076,11 +1105,11 @@ def create_app() -> Flask:
         ip_address: str,
         position: dict[str, float] | None = None,
         device_type: str = "wifi",
-        strip_mode: str = "auto",
+        strip_mode: str | None = None,
         strips: list[dict[str, object]] | None = None,
     ) -> None:
         existing_row = db.execute(
-            "SELECT position_x, position_y FROM devices WHERE id = ?",
+            "SELECT position_x, position_y, strip_mode, ip_address, device_type FROM devices WHERE id = ?",
             (device_id,),
         ).fetchone()
 
@@ -1094,6 +1123,12 @@ def create_app() -> Flask:
 
         pos_x = float(coords.get("x", 400))
         pos_y = float(coords.get("y", 300))
+        existing_mode = (existing_row["strip_mode"] if existing_row else None) or "auto"
+        normalized_strip_mode = (strip_mode or existing_mode).lower()
+
+        persisted_ip = ip_address or (existing_row["ip_address"] if existing_row else ip_address)
+        persisted_type = device_type or (existing_row["device_type"] if existing_row else device_type)
+
         db.execute(
             """
             INSERT INTO devices (id, scene_id, position_x, position_y, ip_address, device_type, strip_mode)
@@ -1107,28 +1142,79 @@ def create_app() -> Flask:
                 strip_mode = excluded.strip_mode,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (device_id, scene_id, pos_x, pos_y, ip_address, device_type, strip_mode),
+            (device_id, scene_id, pos_x, pos_y, persisted_ip, persisted_type, normalized_strip_mode),
         )
 
-        db.execute("DELETE FROM led_strips WHERE device_id = ?", (device_id,))
-
-        if not strips:
+        if normalized_strip_mode == "manual":
             return
 
-        for strip_index, strip in enumerate(strips):
-            strip_id = strip.get("id") or f"strip-{uuid4().hex}"
-            gpio_pin = int(strip.get("gpioPin", 18))
-            led_count = int(strip.get("ledCount", 10))
-            db.execute(
-                """
-                INSERT INTO led_strips (id, device_id, gpio_pin, led_count)
-                VALUES (?, ?, ?, ?)
+        incoming_strips = strips or []
+        if not incoming_strips:
+            return
+
+        existing_strips = db.execute(
+            """
+            SELECT id, gpio_pin, led_count FROM led_strips
+            WHERE device_id = ?
             """,
-                (strip_id, device_id, gpio_pin, led_count),
+            (device_id,),
+        ).fetchall()
+        existing_by_id = {row["id"]: row for row in existing_strips}
+        existing_by_pin = {row["gpio_pin"]: row for row in existing_strips}
+
+        seen_strip_ids: set[str] = set()
+
+        for strip_index, strip in enumerate(incoming_strips):
+            if not isinstance(strip, dict):
+                continue
+            gpio_pin = int(strip.get("gpioPin") or strip.get("pin") or strip.get("gpio_pin") or 18)
+            led_count = int(
+                strip.get("ledCount")
+                or strip.get("led_count")
+                or (len(strip.get("leds", [])) if isinstance(strip.get("leds"), list) else 10)
             )
 
+            target_row: sqlite3.Row | None = None
+            strip_id = strip.get("id")
+            if isinstance(strip_id, str) and strip_id in existing_by_id:
+                target_row = existing_by_id[strip_id]
+            elif gpio_pin in existing_by_pin:
+                target_row = existing_by_pin[gpio_pin]
+                strip_id = target_row["id"]
+
+            if target_row is None:
+                strip_id = strip_id or f"{device_id}-strip-{uuid4().hex[:8]}"
+                db.execute(
+                    """
+                    INSERT INTO led_strips (id, device_id, gpio_pin, led_count)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (strip_id, device_id, gpio_pin, led_count),
+                )
+                target_row = {"id": strip_id, "gpio_pin": gpio_pin, "led_count": led_count}
+
+            seen_strip_ids.add(strip_id)
+            metadata_changed = False
+            if (
+                target_row["gpio_pin"] != gpio_pin
+                or target_row["led_count"] != led_count
+            ):
+                metadata_changed = True
+                db.execute(
+                    """
+                    UPDATE led_strips
+                    SET gpio_pin = ?, led_count = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (gpio_pin, led_count, strip_id),
+                )
+
             leds_payload = strip.get("leds")
-            if not isinstance(leds_payload, list) or not leds_payload:
+            should_refresh_leds = False
+            if isinstance(leds_payload, list) and leds_payload:
+                should_refresh_leds = True
+            elif metadata_changed:
+                should_refresh_leds = True
                 leds_payload = _generate_led_layout(
                     led_count=led_count,
                     strip_index=strip_index,
@@ -1137,29 +1223,37 @@ def create_app() -> Flask:
                     id_prefix=f"{device_id}-{strip_id}",
                 )
 
-            for led in leds_payload:
-                led_id = led.get("id") or f"led-{uuid4().hex}"
-                led_position = led.get("position", {})
-                db.execute(
-                    """
-                    INSERT INTO leds (id, strip_id, position_x, position_y, color, opacity)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        position_x = excluded.position_x,
-                        position_y = excluded.position_y,
-                        color = excluded.color,
-                        opacity = excluded.opacity,
-                        updated_at = CURRENT_TIMESTAMP
-                """,
-                    (
-                        led_id,
-                        strip_id,
-                        float(led_position.get("x", 0)),
-                        float(led_position.get("y", 0)),
-                        led.get("color", "#ffffff"),
-                        float(led.get("opacity", 1.0)),
-                    ),
-                )
+            if should_refresh_leds and isinstance(leds_payload, list):
+                db.execute("DELETE FROM leds WHERE strip_id = ?", (strip_id,))
+                for led in leds_payload:
+                    led_id = led.get("id") or f"led-{uuid4().hex}"
+                    led_position = led.get("position", {})
+                    db.execute(
+                        """
+                        INSERT INTO leds (id, strip_id, position_x, position_y, color, opacity)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            position_x = excluded.position_x,
+                            position_y = excluded.position_y,
+                            color = excluded.color,
+                            opacity = excluded.opacity,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (
+                            led_id,
+                            strip_id,
+                            float(led_position.get("x", pos_x)),
+                            float(led_position.get("y", pos_y)),
+                            led.get("color", "#ffffff"),
+                            float(led.get("opacity", 1.0)),
+                        ),
+                    )
+
+        existing_ids = {row["id"] for row in existing_strips}
+        to_remove = existing_ids - seen_strip_ids
+        for strip_id in to_remove:
+            db.execute("DELETE FROM leds WHERE strip_id = ?", (strip_id,))
+            db.execute("DELETE FROM led_strips WHERE id = ?", (strip_id,))
 
         return device_id
 
@@ -2894,12 +2988,22 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         playback_state = app.config.setdefault("PLAYBACK_STATE", {})
         scene_state = playback_state.setdefault(scene_id, {})
+        led_states = payload.get("ledStates", {})
         scene_state["last_frame"] = {
             "timestamp": timestamp_ms,
-            "ledStates": payload.get("ledStates", {}),
+            "ledStates": led_states,
             "receivedAt": _now_iso(),
         }
         LOGGER.debug("Queued frame apply for scene %s at %sms", scene_id, timestamp_ms)
+        if led_states:
+            _send_ws_command(
+                command="live_frame",
+                payload={
+                    "sceneId": scene_id,
+                    "timestamp": timestamp_ms,
+                    "ledStates": led_states,
+                },
+            )
         return jsonify({"status": "queued"})
 
     @app.patch("/api/v2/devices/<device_id>/leds")

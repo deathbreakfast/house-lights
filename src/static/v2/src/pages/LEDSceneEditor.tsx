@@ -626,9 +626,12 @@ export const LEDSceneEditor: React.FC = () => {
         body: JSON.stringify({ ledStates: frameLedState }),
         signal: controller.signal,
       }
-    ).catch((error) =>
-      console.error("Error applying frame to playback engine:", error)
-    );
+    ).catch((error) => {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+      console.error("Error applying frame to playback engine:", error);
+    });
     return () => controller.abort();
   }, [
     currentSceneId,
@@ -2398,6 +2401,8 @@ export const LEDSceneEditor: React.FC = () => {
         return;
       }
 
+      const shouldOpenProps = tool === "select";
+
       if (tool === "pan") {
         setIsPanning(true);
         setLastPanPosition({ x: event.clientX, y: event.clientY });
@@ -2413,7 +2418,7 @@ export const LEDSceneEditor: React.FC = () => {
             setSelectedDeviceId(device.id);
             setSelectedLEDId(null);
             suppressNextOutsideCloseRef.current = true;
-            setShowPropertiesPanel(true);
+            setShowPropertiesPanel(shouldOpenProps);
             setIsDraggingElement(true);
             setDragStartOffset({
               x: point.x - device.position.x,
@@ -2435,7 +2440,7 @@ export const LEDSceneEditor: React.FC = () => {
                 setSelectedLEDId(led.id);
                 setSelectedDeviceId(null);
                 suppressNextOutsideCloseRef.current = true;
-                setShowPropertiesPanel(true);
+                setShowPropertiesPanel(shouldOpenProps);
                 setIsDraggingElement(true);
                 setDragStartOffset({
                   x: point.x - led.position.x,
