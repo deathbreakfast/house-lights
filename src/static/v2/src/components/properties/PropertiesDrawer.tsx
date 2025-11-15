@@ -26,6 +26,7 @@ interface PropertiesDrawerProps {
   onBackgroundImageScaleChange: (scale: number) => void;
   onDeviceTypeChange: (deviceId: string, type: "local" | "wifi" | "virtual") => void;
   onDeviceIpChange: (deviceId: string, ipAddress: string) => void;
+  onDeviceConnect: (deviceId: string) => void;
   onDeviceStripModeChange: (deviceId: string, mode: "auto" | "manual") => void;
   onAddStrip: (deviceId: string, gpioPin: number, ledCount: number) => void;
   onRemoveStrip: (deviceId: string, stripId: string) => void;
@@ -54,6 +55,7 @@ export const PropertiesDrawer: React.FC<PropertiesDrawerProps> = ({
   onBackgroundImageScaleChange,
   onDeviceTypeChange,
   onDeviceIpChange,
+  onDeviceConnect,
   onDeviceStripModeChange,
   onAddStrip,
   onRemoveStrip,
@@ -179,23 +181,98 @@ export const PropertiesDrawer: React.FC<PropertiesDrawerProps> = ({
                   <label className="text-gray-400 text-sm mb-2 block">
                     IP Address
                   </label>
-                  <input
-                    type="text"
-                    value={selectedDevice.type === "virtual" ? "N/A" : selectedDevice.ipAddress}
-                    onChange={(event) => {
-                      if (selectedDevice.type !== "local" && selectedDevice.type !== "virtual") {
-                        onDeviceIpChange(selectedDeviceId, event.target.value);
-                      }
-                    }}
-                    disabled={selectedDevice.type === "local" || selectedDevice.type === "virtual"}
-                    placeholder={selectedDevice.type === "virtual" ? "N/A" : "192.168.1.100"}
-                    className={`w-full px-3 py-2 rounded-lg bg-white/5 border border-white/20 text-white ${
-                      (selectedDevice.type === "local" || selectedDevice.type === "virtual")
-                        ? "opacity-50 cursor-not-allowed"
-                        : ""
-                    }`}
-                  />
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={selectedDevice.type === "virtual" ? "N/A" : selectedDevice.ipAddress}
+                      onChange={(event) => {
+                        if (selectedDevice.type !== "local" && selectedDevice.type !== "virtual") {
+                          onDeviceIpChange(selectedDeviceId, event.target.value);
+                        }
+                      }}
+                      onBlur={() => {
+                        if (selectedDevice.type === "wifi") {
+                          onDeviceConnect(selectedDeviceId);
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && selectedDevice.type === "wifi") {
+                          event.preventDefault();
+                          onDeviceConnect(selectedDeviceId);
+                          (event.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      disabled={selectedDevice.type === "local" || selectedDevice.type === "virtual"}
+                      placeholder={selectedDevice.type === "virtual" ? "N/A" : "192.168.1.100"}
+                      className={`flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/20 text-white ${
+                        selectedDevice.type === "local" || selectedDevice.type === "virtual"
+                          ? "opacity-50 cursor-not-allowed"
+                          : ""
+                      }`}
+                    />
+                    {selectedDevice.type === "wifi" ? (
+                      <button
+                        type="button"
+                        onClick={() => onDeviceConnect(selectedDeviceId)}
+                        disabled={selectedDevice.connectionState === "connecting"}
+                        className="px-3 py-2 rounded-lg bg-white/10 border border-white/20 text-white hover:bg-white/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {selectedDevice.connectionState === "connecting" ? (
+                          <span className="flex items-center gap-2">
+                            <span className="w-3 h-3 border-2 border-amber-200 border-t-transparent rounded-full animate-spin" />
+                            Connecting
+                          </span>
+                        ) : (
+                          "Connect"
+                        )}
+                      </button>
+                    ) : null}
+                  </div>
+                  {selectedDevice.connectionState === "connecting" ? (
+                    <p className="text-amber-300 text-sm mt-2 flex items-center gap-2">
+                      <span className="w-3 h-3 border-2 border-amber-200 border-t-transparent rounded-full animate-spin" />
+                      Attempting handshake…
+                    </p>
+                  ) : null}
+                  {selectedDevice.connectionState === "online" ? (
+                    <p className="text-green-400 text-sm mt-2">Device connected</p>
+                  ) : null}
+                  {selectedDevice.connectionState === "error" ? (
+                    <p className="text-red-400 text-sm mt-2">
+                      {selectedDevice.connectionError ?? "Unable to reach device."}
+                    </p>
+                  ) : null}
                 </div>
+                {selectedDevice.health ? (
+                  <div className="mt-3 p-3 rounded-lg bg-white/5 border border-white/10 text-sm text-gray-300 space-y-1">
+                    <div className="flex justify-between">
+                      <span>Status</span>
+                      <span
+                        className={
+                          selectedDevice.health.online ? "text-green-400" : "text-red-400"
+                        }
+                      >
+                        {selectedDevice.health.online ? "Online" : "Offline"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Latency</span>
+                      <span>
+                        {typeof selectedDevice.health.latencyMs === "number"
+                          ? `${selectedDevice.health.latencyMs} ms`
+                          : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Last Seen</span>
+                      <span>
+                        {selectedDevice.health.lastSeenAt
+                          ? new Date(selectedDevice.health.lastSeenAt).toLocaleString()
+                          : "—"}
+                      </span>
+                    </div>
+                  </div>
+                ) : null}
                 <div>
                   <label className="text-gray-400 text-sm mb-2 block">
                     LED Strips

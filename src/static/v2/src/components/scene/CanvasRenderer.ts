@@ -30,10 +30,52 @@ export const drawDevicesAndLEDs = (options: RenderOptions) => {
   ctx.translate(canvasPan.x, canvasPan.y);
   ctx.scale(canvasZoom, canvasZoom);
 
+  const DEVICE_COLOR_MAP: Record<
+    string,
+    { fill: string; stroke: string; fillSelected?: string; strokeSelected?: string }
+  > = {
+    idle: {
+      fill: "#1e3a8a",
+      stroke: "#3b82f6",
+      fillSelected: "#2563eb",
+      strokeSelected: "#60a5fa",
+    },
+    online: {
+      fill: "#1d4ed8",
+      stroke: "#60a5fa",
+      fillSelected: "#2563eb",
+      strokeSelected: "#93c5fd",
+    },
+    connecting: {
+      fill: "#fef3c7",
+      stroke: "#fbbf24",
+      fillSelected: "#fde68a",
+      strokeSelected: "#facc15",
+    },
+    error: {
+      fill: "#fecaca",
+      stroke: "#f87171",
+      fillSelected: "#fca5a5",
+      strokeSelected: "#ef4444",
+    },
+  };
+
   scene.devices.forEach((device) => {
-    ctx.fillStyle = selectedDeviceId === device.id ? "#3b82f6" : "#1e40af";
-    ctx.strokeStyle =
-      selectedDeviceId === device.id ? "#60a5fa" : "#3b82f6";
+    const stateKey =
+      device.connectionState ??
+      (device.health?.online ? "online" : "idle");
+    const palette = DEVICE_COLOR_MAP[stateKey] ?? DEVICE_COLOR_MAP.idle;
+    const fillColor =
+      selectedDeviceId === device.id
+        ? palette.fillSelected ?? palette.fill
+        : palette.fill;
+    const strokeColor =
+      selectedDeviceId === device.id
+        ? palette.strokeSelected ?? palette.stroke
+        : palette.stroke;
+
+    ctx.fillStyle = fillColor;
+    ctx.strokeStyle = strokeColor;
     ctx.lineWidth = 2;
 
     const deviceSize = 30;

@@ -17,6 +17,18 @@ export type LEDStrip = {
   leds: LED[];
 };
 
+export type DeviceHealth = {
+  online?: boolean;
+  lastSeenAt?: string | null;
+  latencyMs?: number | null;
+  clockSkewMs?: number | null;
+  wsConnected?: boolean;
+  playlistHash?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type DeviceConnectionState = "idle" | "connecting" | "online" | "error";
+
 export type Device = {
   id: string;
   position: Point;
@@ -24,6 +36,9 @@ export type Device = {
   strips: LEDStrip[];
   type: "local" | "wifi" | "virtual";
   stripMode: "auto" | "manual"; // Auto uses env variables, manual is user-configured
+  connectionState?: DeviceConnectionState;
+  connectionError?: string | null;
+  health?: DeviceHealth | null;
 };
 
 export type Keyframe = {

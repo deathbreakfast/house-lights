@@ -9,6 +9,8 @@ import logging.handlers
 import os
 import selectors
 import shutil
+import socket
+import threading
 import sqlite3
 import subprocess
 import time
@@ -18,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 from uuid import uuid4
+from urllib.parse import urljoin, urlsplit
+import hashlib
 
 from flask import (
     Flask,
@@ -30,6 +34,8 @@ from flask import (
     stream_with_context,
     url_for,
 )
+import requests
+from flask_sock import Sock
 
 from .database import get_db, init_app as init_db
 from .hardware import LightStripConfig, build_controller
@@ -147,6 +153,14 @@ def _parse_led_counts(raw_value: str | None) -> dict[int, int]:
     return counts
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Return True if env var is truthy."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _build_strip_configs(
     gpio_entries: list[ConfigEntry], led_counts: dict[int, int]
 ) -> list[LightStripConfig]:
@@ -178,6 +192,49 @@ def create_app() -> Flask:
     logging.basicConfig(level=os.getenv("HOUSE_LIGHTS_LOG_LEVEL", "INFO").upper())
 
     app = Flask(__name__, template_folder="templates")
+    app.config["APP_START_TIME"] = time.time()
+    sock = Sock(app)
+    app.config["SOCK_SERVER"] = sock
+
+    is_controller = _env_flag("IS_CONTROLLER", True)
+    app.config["IS_CONTROLLER"] = is_controller
+    app.config["HANDSHAKE_TIMEOUT_SECONDS"] = float(
+        os.getenv("HOUSE_LIGHTS_HANDSHAKE_TIMEOUT", "5")
+    )
+    app.config["DEVICE_HEALTH_MAX_AGE_SECONDS"] = float(
+        os.getenv("HOUSE_LIGHTS_DEVICE_HEALTH_MAX_AGE", "45")
+    )
+    app.config["HEALTH_POLL_INTERVAL_SECONDS"] = float(
+        os.getenv("HOUSE_LIGHTS_HEALTH_POLL_INTERVAL", "60")
+    )
+    app.config["WS_CLIENTS"]: dict[str, dict[str, object]] = {}
+    app.config["WS_CLIENT_LOCK"] = threading.Lock()
+    controller_only_prefixes = (
+        "/api/v2",
+        "/patterns",
+        "/lights",
+        "/api/patterns",
+        "/api/logs",
+    )
+    controller_only_exact = {"/patterns/configure"}
+
+    @app.before_request
+    def _restrict_controller_routes() -> None:
+        if app.config.get("IS_CONTROLLER", True):
+            return
+        path = request.path or "/"
+        normalized = path.rstrip("/") or "/"
+        for prefix in controller_only_prefixes:
+            if normalized == prefix or normalized.startswith(f"{prefix}/"):
+                abort(
+                    403,
+                    description="Controller-only endpoint is disabled on this device.",
+                )
+        if normalized in controller_only_exact:
+            abort(
+                403,
+                description="Controller-only endpoint is disabled on this device.",
+            )
 
     pattern_dir_env = os.getenv("HOUSE_LIGHTS_PATTERN_DIR")
     pattern_dir = (
@@ -245,17 +302,25 @@ def create_app() -> Flask:
     app.config["SIMULATED_STRIPS_BY_PIN"]: dict[int, LightStripConfig] = {}
     app.config["SYSTEMD_SERVICE_NAME"] = systemd_service_name
     
-    # Initialize database
-    init_db(app)
+    # Initialize database (controller only)
+    if is_controller:
+        init_db(app)
+    else:
+        LOGGER.info("IS_CONTROLLER flag is false; skipping controller database initialization.")
     
     # Set up storage directories
-    storage_dir = Path.home() / ".houselights" / "v2"
-    storage_dir.mkdir(parents=True, exist_ok=True)
-    app.config["V2_STORAGE_DIR"] = storage_dir
-    app.config["V2_IMAGES_DIR"] = storage_dir / "images"
-    app.config["V2_IMAGES_DIR"].mkdir(parents=True, exist_ok=True)
-    app.config["V2_AUDIO_DIR"] = storage_dir / "audio"
-    app.config["V2_AUDIO_DIR"].mkdir(parents=True, exist_ok=True)
+    if is_controller:
+        storage_dir = Path.home() / ".houselights" / "v2"
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        app.config["V2_STORAGE_DIR"] = storage_dir
+        app.config["V2_IMAGES_DIR"] = storage_dir / "images"
+        app.config["V2_IMAGES_DIR"].mkdir(parents=True, exist_ok=True)
+        app.config["V2_AUDIO_DIR"] = storage_dir / "audio"
+        app.config["V2_AUDIO_DIR"].mkdir(parents=True, exist_ok=True)
+    else:
+        app.config["V2_STORAGE_DIR"] = None
+        app.config["V2_IMAGES_DIR"] = None
+        app.config["V2_AUDIO_DIR"] = None
 
     def _now_iso() -> str:
         return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -632,6 +697,8 @@ def create_app() -> Flask:
         "is_on": False,
         "selected_pattern": default_pattern,
     }
+    app.config["LIVE_MODE_ENABLED"] = False
+    app.config["PLAYBACK_STATE"] = {}
     
     def _safe_scene_data(raw_data: str | None) -> dict[str, object]:
         if not raw_data:
@@ -644,6 +711,465 @@ def create_app() -> Flask:
         if not isinstance(parsed, dict):
             return {}
         return parsed
+
+    def _safe_json_dict(raw_data: str | None) -> dict[str, object]:
+        if not raw_data:
+            return {}
+        try:
+            parsed = json.loads(raw_data)
+        except json.JSONDecodeError:
+            LOGGER.warning("Failed to parse JSON payload; returning empty dict.")
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return parsed
+
+    def _safe_json_list(raw_data: str | None) -> list[object]:
+        if not raw_data:
+            return []
+        try:
+            parsed = json.loads(raw_data)
+        except json.JSONDecodeError:
+            LOGGER.warning("Failed to parse JSON list payload; returning []")
+            return []
+        if isinstance(parsed, list):
+            return parsed
+        return []
+
+    def _device_identity_payload() -> dict[str, object]:
+        device_id = os.getenv("HOUSE_LIGHTS_DEVICE_ID") or socket.gethostname()
+        hardware_id = os.getenv("HOUSE_LIGHTS_HARDWARE_ID") or device_id
+        device_name = os.getenv("HOUSE_LIGHTS_DEVICE_NAME") or device_id
+        device_type = os.getenv("HOUSE_LIGHTS_DEVICE_TYPE") or (
+            "controller" if app.config.get("IS_CONTROLLER") else "follower"
+        )
+        strip_mode = os.getenv("HOUSE_LIGHTS_DEVICE_STRIP_MODE", "auto")
+        firmware_version = os.getenv("HOUSE_LIGHTS_FIRMWARE_VERSION") or os.getenv(
+            "HOUSE_LIGHTS_VERSION"
+        )
+        capabilities = _safe_json_dict(os.getenv("HOUSE_LIGHTS_DEVICE_CAPABILITIES"))
+        return {
+            "deviceId": device_id,
+            "deviceName": device_name,
+            "hardwareId": hardware_id,
+            "deviceType": device_type,
+            "stripMode": strip_mode,
+            "firmwareVersion": firmware_version,
+            "capabilities": capabilities,
+            "isController": app.config.get("IS_CONTROLLER"),
+        }
+
+    def _resolve_device_ip() -> str | None:
+        explicit = os.getenv("HOUSE_LIGHTS_DEVICE_IP")
+        if explicit:
+            return explicit
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return None
+
+    def _build_device_base_url(
+        target: str, *, protocol: str | None = None, port: int | None = None
+    ) -> str:
+        """Normalize a device base URL from an IP/hostname."""
+        candidate = target.strip()
+        if not candidate:
+            raise ValueError("Device address cannot be blank.")
+        if candidate.startswith(("http://", "https://")):
+            base = candidate
+        else:
+            scheme = protocol or "http"
+            base = f"{scheme}://{candidate}"
+
+        parsed = urlsplit(base)
+        netloc = parsed.netloc
+        if port and ":" not in netloc:
+            netloc = f"{netloc}:{port}"
+            base = parsed._replace(netloc=netloc).geturl()
+
+        return base.rstrip("/")
+
+    def _fetch_remote_json(url: str, *, timeout: float) -> tuple[dict[str, object], float]:
+        """Fetch JSON from a remote device and measure latency."""
+        start = time.perf_counter()
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError(f"Expected JSON object from {url}")
+        return payload, elapsed_ms
+
+    def _controller_clock_payload() -> dict[str, object]:
+        return {"iso": _now_iso(), "unixTimeMs": int(time.time() * 1000)}
+
+    def _register_ws_client(device_id: str, ws_conn, handshake_payload: dict[str, object]) -> None:
+        with app.config["WS_CLIENT_LOCK"]:
+            app.config["WS_CLIENTS"][device_id] = {
+                "socket": ws_conn,
+                "handshake": handshake_payload,
+                "connected_at": _now_iso(),
+            }
+        metadata_patch = {
+            "handshake": handshake_payload,
+            "wsConnectedAt": _now_iso(),
+        }
+        _update_device_health_metadata(device_id, metadata_patch, ws_connected=True)
+
+    def _unregister_ws_client(device_id: str, *, close_socket: bool = False) -> None:
+        with app.config["WS_CLIENT_LOCK"]:
+            entry = app.config["WS_CLIENTS"].pop(device_id, None)
+        ws_conn = entry.get("socket") if entry else None
+        _update_device_health_metadata(
+            device_id, {"wsDisconnectedAt": _now_iso()}, ws_connected=False
+        )
+        if close_socket and ws_conn is not None:
+            with contextlib.suppress(Exception):
+                ws_conn.close()
+
+    def _send_ws_command(
+        *,
+        command: str,
+        payload: dict[str, object],
+        device_ids: list[str] | None = None,
+    ) -> dict[str, bool]:
+        with app.config["WS_CLIENT_LOCK"]:
+            if device_ids is None:
+                targets = app.config["WS_CLIENTS"].copy()
+            else:
+                targets = {
+                    device_id: app.config["WS_CLIENTS"].get(device_id)
+                    for device_id in device_ids
+                    if app.config["WS_CLIENTS"].get(device_id)
+                }
+
+        message = json.dumps(
+            {
+                "type": "command",
+                "command": command,
+                "payload": payload,
+                "controllerClock": _controller_clock_payload(),
+            }
+        )
+
+        results: dict[str, bool] = {}
+        for device_id, entry in targets.items():
+            if not entry:
+                results[device_id] = False
+                continue
+            socket_obj = entry.get("socket")
+            try:
+                socket_obj.send(message)
+                results[device_id] = True
+            except Exception:
+                LOGGER.warning("Failed to send WS command to %s; dropping connection.", device_id)
+                results[device_id] = False
+                _unregister_ws_client(device_id, close_socket=True)
+        return results
+
+    def _compute_playlist_hash(payload: dict[str, object]) -> str:
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8"))
+        return digest.hexdigest()
+
+    def _notify_playlist_ready(
+        device_id: str,
+        *,
+        playlist_id: str,
+        playlist_hash: str,
+        entry_count: int,
+    ) -> str:
+        try:
+            download_url = url_for("download_device_playlist", device_id=device_id, _external=True)
+        except RuntimeError:
+            download_url = f"/api/v2/devices/{device_id}/playlist/download"
+        command_payload = {
+            "playlistId": playlist_id,
+            "playlistHash": playlist_hash,
+            "entryCount": entry_count,
+            "downloadUrl": download_url,
+        }
+        _send_ws_command(
+            command="playlist_ready",
+            payload=command_payload,
+            device_ids=[device_id],
+        )
+        return download_url
+
+    def _maybe_dispatch_playlists(target_device_ids: list[str] | None = None) -> None:
+        """Send playlist-ready commands when in scheduled mode."""
+        if app.config.get("LIVE_MODE_ENABLED"):
+            LOGGER.debug("Live mode enabled; skipping playlist dispatch.")
+            return
+        light_state = app.config.get("LIGHT_STATE", {})
+        if not light_state.get("is_on"):
+            LOGGER.debug("Lights are off; skipping playlist dispatch.")
+            return
+
+        db = get_db(app)
+        if target_device_ids is None:
+            device_rows = db.execute("SELECT id FROM devices").fetchall()
+            device_ids = [row["id"] for row in device_rows]
+        else:
+            device_ids = target_device_ids
+
+        for device_id in device_ids:
+            row = db.execute(
+                """
+                SELECT id, playlist_hash, payload
+                FROM device_playlists
+                WHERE device_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (device_id,),
+            ).fetchone()
+            if not row:
+                continue
+            playlist_payload = _safe_scene_data(row["payload"])
+            entries = playlist_payload.get("entries")
+            if not isinstance(entries, list):
+                entries = []
+            _notify_playlist_ready(
+                device_id,
+                playlist_id=row["id"],
+                playlist_hash=row["playlist_hash"],
+                entry_count=len(entries),
+            )
+
+    def _poll_device_health(device_id: str, ip_address: str) -> None:
+        """Poll device health and update SQLite."""
+        timeout = app.config.get("HANDSHAKE_TIMEOUT_SECONDS", 5.0)
+        try:
+            base_url = _build_device_base_url(ip_address)
+        except ValueError:
+            LOGGER.warning("Skipping health poll for %s due to invalid IP %s", device_id, ip_address)
+            return
+
+        try:
+            health_payload, latency_ms = _fetch_remote_json(
+                urljoin(f"{base_url}/", "api/device/health"),
+                timeout=timeout,
+            )
+        except Exception as exc:
+            LOGGER.debug("Health poll failed for %s: %s", device_id, exc)
+            _update_device_health_metadata(
+                device_id,
+                {"lastHealthError": {"at": _now_iso(), "error": str(exc)}},
+                ws_connected=None,
+            )
+            return
+
+        try:
+            meta_payload, _ = _fetch_remote_json(
+                urljoin(f"{base_url}/", "api/device/meta"),
+                timeout=timeout,
+            )
+        except Exception:
+            meta_payload = None
+
+        metadata_patch = {
+            "lastHealth": {
+                "payload": health_payload,
+                "latencyMs": latency_ms,
+                "polledAt": _now_iso(),
+            },
+        }
+        if meta_payload is not None:
+            metadata_patch["lastMeta"] = meta_payload
+
+        _update_device_health_metadata(
+            device_id,
+            metadata_patch,
+            ws_connected=None,
+        )
+
+        clock_skew_ms = None
+        remote_unix = health_payload.get("unixTimeMs") if isinstance(health_payload, dict) else None
+        if isinstance(remote_unix, (int, float)):
+            clock_skew_ms = int(remote_unix) - int(time.time() * 1000)
+
+        db = get_db(app)
+        db.execute(
+            """
+            UPDATE device_health
+            SET last_latency_ms = ?, clock_skew_ms = COALESCE(?, clock_skew_ms)
+            WHERE device_id = ?
+            """,
+            (
+                int(latency_ms) if latency_ms is not None else None,
+                int(clock_skew_ms) if clock_skew_ms is not None else None,
+                device_id,
+            ),
+        )
+        db.commit()
+
+    def _poll_all_devices_health() -> None:
+        """Iterate over devices and poll their health endpoints."""
+        db = get_db(app)
+        devices = db.execute(
+            "SELECT id, ip_address FROM devices ORDER BY updated_at DESC"
+        ).fetchall()
+        for device_row in devices:
+            device_id = device_row["id"]
+            ip_address = device_row["ip_address"]
+            if not ip_address:
+                continue
+            try:
+                _poll_device_health(device_id, ip_address)
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.warning("Health polling error for %s: %s", device_id, exc)
+
+    def _start_health_poller() -> None:
+        """Start background thread to poll device health periodically."""
+        if not app.config.get("IS_CONTROLLER", True):
+            return
+        interval = app.config.get("HEALTH_POLL_INTERVAL_SECONDS", 60.0)
+        if interval <= 0:
+            LOGGER.info("Health poller disabled (interval %s).", interval)
+            return
+
+        def _poller() -> None:
+            with app.app_context():
+                while True:
+                    try:
+                        _poll_all_devices_health()
+                    except Exception:  # pragma: no cover - defensive
+                        LOGGER.exception("Health poller iteration failed.")
+                    time.sleep(interval)
+
+        thread = threading.Thread(target=_poller, name="health-poller", daemon=True)
+        thread.start()
+        app.config["HEALTH_POLL_THREAD"] = thread
+
+    def _persist_device_graph(
+        db: sqlite3.Connection,
+        *,
+        device_id: str,
+        scene_id: str,
+        ip_address: str,
+        position: dict[str, float] | None = None,
+        device_type: str = "wifi",
+        strip_mode: str = "auto",
+        strips: list[dict[str, object]] | None = None,
+    ) -> None:
+        coords = position or {"x": 400, "y": 300}
+        pos_x = float(coords.get("x", 400))
+        pos_y = float(coords.get("y", 300))
+        db.execute(
+            """
+            INSERT INTO devices (id, scene_id, position_x, position_y, ip_address, device_type, strip_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                scene_id = excluded.scene_id,
+                position_x = excluded.position_x,
+                position_y = excluded.position_y,
+                ip_address = excluded.ip_address,
+                device_type = excluded.device_type,
+                strip_mode = excluded.strip_mode,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (device_id, scene_id, pos_x, pos_y, ip_address, device_type, strip_mode),
+        )
+
+        db.execute("DELETE FROM led_strips WHERE device_id = ?", (device_id,))
+
+        if not strips:
+            return
+
+        for strip in strips:
+            strip_id = strip.get("id") or f"strip-{uuid4().hex}"
+            gpio_pin = int(strip.get("gpioPin", 18))
+            led_count = int(strip.get("ledCount", 10))
+            db.execute(
+                """
+                INSERT INTO led_strips (id, device_id, gpio_pin, led_count)
+                VALUES (?, ?, ?, ?)
+            """,
+                (strip_id, device_id, gpio_pin, led_count),
+            )
+
+            for led in strip.get("leds", []) or []:
+                led_id = led.get("id") or f"led-{uuid4().hex}"
+                led_position = led.get("position", {})
+                db.execute(
+                    """
+                    INSERT INTO leds (id, strip_id, position_x, position_y, color, opacity)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        position_x = excluded.position_x,
+                        position_y = excluded.position_y,
+                        color = excluded.color,
+                        opacity = excluded.opacity,
+                        updated_at = CURRENT_TIMESTAMP
+                """,
+                    (
+                        led_id,
+                        strip_id,
+                        float(led_position.get("x", 0)),
+                        float(led_position.get("y", 0)),
+                        led.get("color", "#ffffff"),
+                        float(led.get("opacity", 1.0)),
+                    ),
+                )
+
+        return device_id
+
+    def _update_device_health_metadata(
+        device_id: str,
+        metadata_patch: dict[str, object] | None = None,
+        *,
+        ws_connected: bool | None = None,
+    ) -> None:
+        try:
+            db = get_db(app)
+        except RuntimeError:
+            return
+
+        row = db.execute(
+            "SELECT metadata FROM device_health WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        merged = _safe_json_dict(row["metadata"]) if row else {}
+        if metadata_patch:
+            merged.update(metadata_patch)
+
+        ws_value = None
+        if ws_connected is True:
+            ws_value = 1
+        elif ws_connected is False:
+            ws_value = 0
+
+        if row:
+            db.execute(
+                """
+                UPDATE device_health
+                SET last_seen_at = CURRENT_TIMESTAMP,
+                    last_heartbeat_at = CURRENT_TIMESTAMP,
+                    ws_connected = COALESCE(?, ws_connected),
+                    metadata = ?
+                WHERE device_id = ?
+                """,
+                (ws_value, json.dumps(merged), device_id),
+            )
+        else:
+            db.execute(
+                """
+                INSERT INTO device_health (
+                    device_id,
+                    last_seen_at,
+                    last_heartbeat_at,
+                    last_latency_ms,
+                    clock_skew_ms,
+                    ws_connected,
+                    playlist_hash,
+                    metadata
+                ) VALUES (
+                    ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?, NULL, ?
+                )
+                """,
+                (device_id, ws_value if ws_value is not None else 1, json.dumps(merged)),
+            )
+        db.commit()
     
     def _ensure_scene_exists(
         db: sqlite3.Connection, scene_id: str, *, name: str | None = None
@@ -663,6 +1189,17 @@ def create_app() -> Flask:
         )
         db.commit()
     
+    def _parse_db_timestamp(raw_value: str | None) -> datetime | None:
+        if not raw_value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw_value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
     def _serialize_scene_row(row: sqlite3.Row) -> dict[str, object]:
         data = _safe_scene_data(row["data"])
         audio_meta = data.get("audio") if isinstance(data, dict) else None
@@ -710,6 +1247,15 @@ def create_app() -> Flask:
     @app.get("/")
     def index() -> str:
         """Render the control dashboard."""
+        if not app.config.get("IS_CONTROLLER", True):
+            identity = _device_identity_payload()
+            return jsonify(
+                {
+                    "status": "follower",
+                    "message": "Controller UI disabled on this device.",
+                    "device": identity,
+                }
+            )
         light_state = app.config["LIGHT_STATE"]
         current_gpio_entries = _parse_config_list(os.getenv("HOUSE_LIGHTS_GPIO_PINS"))
         light_range_config = _parse_config_list(os.getenv("HOUSE_LIGHTS_LIGHT_RANGES"))
@@ -726,6 +1272,8 @@ def create_app() -> Flask:
     @app.get("/v2")
     def studio_v2() -> str:
         """Render the experimental v2 studio workspace."""
+        if not app.config.get("IS_CONTROLLER", True):
+            abort(404)
         return render_template("v2.html")
     
     def _upload_background_image(scene_id: str):
@@ -1200,7 +1748,21 @@ def create_app() -> Flask:
             """,
             (scene_id,),
         ).fetchall()
-        
+        device_ids = [device_row["id"] for device_row in devices]
+        health_map: dict[str, sqlite3.Row] = {}
+        if device_ids:
+            placeholders = ",".join("?" for _ in device_ids)
+            health_rows = db.execute(
+                f"""
+                SELECT device_id, last_seen_at, last_latency_ms, clock_skew_ms,
+                       ws_connected, playlist_hash, metadata
+                FROM device_health
+                WHERE device_id IN ({placeholders})
+                """,
+                device_ids,
+            ).fetchall()
+            health_map = {row["device_id"]: row for row in health_rows}
+
         result = []
         for device_row in devices:
             device_id = device_row["id"]
@@ -1247,6 +1809,26 @@ def create_app() -> Flask:
                     ],
                 })
             
+            health_row = health_map.get(device_id)
+            health_payload = None
+            if health_row:
+                metadata = _safe_json_dict(health_row["metadata"])
+                last_seen_at = health_row["last_seen_at"]
+                parsed_seen = _parse_db_timestamp(last_seen_at)
+                is_online = False
+                if parsed_seen:
+                    age = (datetime.now(timezone.utc) - parsed_seen).total_seconds()
+                    is_online = age <= app.config.get("DEVICE_HEALTH_MAX_AGE_SECONDS", 45)
+                health_payload = {
+                    "online": is_online,
+                    "lastSeenAt": last_seen_at,
+                    "latencyMs": health_row["last_latency_ms"],
+                    "clockSkewMs": health_row["clock_skew_ms"],
+                    "wsConnected": bool(health_row["ws_connected"]),
+                    "playlistHash": health_row["playlist_hash"],
+                    "metadata": metadata,
+                }
+
             result.append({
                 "id": device_id,
                 "position": {
@@ -1257,9 +1839,59 @@ def create_app() -> Flask:
                 "type": device_row["device_type"],
                 "stripMode": device_row["strip_mode"],
                 "strips": strips_with_leds,
+                "health": health_payload,
             })
         
         return jsonify(result)
+
+    @app.get("/api/device/meta")
+    def get_device_meta_info():
+        """Expose local device metadata for controller handshakes."""
+        identity = _device_identity_payload()
+        strips = _active_strip_configs()
+        from_simulator = _simulator_enabled()
+        strip_payloads = [
+            {
+                "id": f"{identity['deviceId']}-{config.pin}",
+                "gpioPin": config.pin,
+                "pin": config.pin,
+                "ledCount": config.led_count,
+                "name": config.name,
+                "simulated": from_simulator,
+            }
+            for config in strips
+        ]
+        ip_address = _resolve_device_ip()
+        payload = {
+            **identity,
+            "ipAddress": ip_address,
+            "controllerHost": os.getenv("HOUSE_LIGHTS_CONTROLLER_HOST"),
+            "timestamp": _now_iso(),
+            "unixTimeMs": int(time.time() * 1000),
+            "strips": strip_payloads,
+            "limits": {
+                "max_strips": MAX_SIMULATED_STRIPS,
+                "max_leds_per_strip": MAX_LED_COUNT_PER_STRIP,
+            },
+        }
+        return jsonify(payload)
+
+    @app.get("/api/device/health")
+    def get_device_health():
+        """Expose lightweight health data for polling."""
+        identity = _device_identity_payload()
+        uptime_seconds = int(max(0, time.time() - app.config.get("APP_START_TIME", time.time())))
+        light_state = app.config.get("LIGHT_STATE", {})
+        payload = {
+            "deviceId": identity["deviceId"],
+            "status": "ok",
+            "powerOn": bool(light_state.get("is_on")),
+            "liveMode": bool(app.config.get("LIVE_MODE_ENABLED", False)),
+            "uptimeSeconds": uptime_seconds,
+            "timestamp": _now_iso(),
+            "unixTimeMs": int(time.time() * 1000),
+        }
+        return jsonify(payload)
     
     @app.post("/api/v2/scenes/<scene_id>/devices")
     def create_device(scene_id: str):
@@ -1277,59 +1909,562 @@ def create_app() -> Flask:
         
         db = get_db(app)
         
-        # Insert device
-        db.execute(
-            """
-            INSERT INTO devices (id, scene_id, position_x, position_y, ip_address, device_type, strip_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                position_x = excluded.position_x,
-                position_y = excluded.position_y,
-                ip_address = excluded.ip_address,
-                device_type = excluded.device_type,
-                strip_mode = excluded.strip_mode,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (device_id, scene_id, position["x"], position["y"], ip_address, device_type, strip_mode),
+        persisted_id = _persist_device_graph(
+            db,
+            device_id=device_id,
+            scene_id=scene_id,
+            ip_address=ip_address,
+            position=position,
+            device_type=device_type,
+            strip_mode=strip_mode,
+            strips=strips,
         )
-        
-        # Delete existing strips and LEDs (cascade will handle LEDs)
-        db.execute("DELETE FROM led_strips WHERE device_id = ?", (device_id,))
-        
-        # Insert strips and their LEDs
-        for strip in strips:
-            strip_id = strip.get("id") or str(uuid4())
-            db.execute(
-                """
-                INSERT INTO led_strips (id, device_id, gpio_pin, led_count)
-                VALUES (?, ?, ?, ?)
-                """,
-                (strip_id, device_id, strip.get("gpioPin", 18), strip.get("ledCount", 10)),
-            )
-            
-            # Insert LEDs for this strip
-            strip_leds = strip.get("leds", [])
-            for led in strip_leds:
-                led_id = led.get("id") or str(uuid4())
-                led_position = led.get("position", {"x": 0, "y": 0})
-                db.execute(
-                    """
-                    INSERT INTO leds (id, strip_id, position_x, position_y, color, opacity)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        led_id,
-                        strip_id,
-                        led_position.get("x", 0),
-                        led_position.get("y", 0),
-                        led.get("color", "#ffffff"),
-                        led.get("opacity", 1.0),
-                    ),
-                )
-        
         db.commit()
         
-        return jsonify({"id": device_id}), 201
+        return jsonify({"id": persisted_id}), 201
+
+    @app.post("/api/v2/devices/handshake")
+    def initiate_device_handshake():
+        """Connect to a remote device and persist its metadata."""
+        data = request.get_json(silent=True) or {}
+        scene_id = data.get("sceneId")
+        if not isinstance(scene_id, str) or not scene_id.strip():
+            abort(400, description="sceneId is required.")
+        scene_id = scene_id.strip()
+
+        ip_address = data.get("ipAddress") or data.get("address")
+        if not isinstance(ip_address, str) or not ip_address.strip():
+            abort(400, description="ipAddress is required.")
+        ip_address = ip_address.strip()
+
+        base_url = data.get("baseUrl")
+        protocol = data.get("protocol")
+        port = data.get("port")
+        port_value: int | None = None
+        if port is not None:
+            try:
+                port_value = int(port)
+            except (TypeError, ValueError):
+                abort(400, description="port must be numeric when provided.")
+
+        if base_url:
+            base_url = base_url.rstrip("/")
+        else:
+            try:
+                base_url = _build_device_base_url(ip_address, protocol=protocol, port=port_value)
+            except ValueError as exc:
+                abort(400, description=str(exc))
+
+        timeout = app.config.get("HANDSHAKE_TIMEOUT_SECONDS", 5.0)
+        handshake_id = f"hs-{uuid4().hex}"
+        controller_unix_ms = int(time.time() * 1000)
+        controller_iso = _now_iso()
+
+        metadata_payload: dict[str, object] | None = None
+        health_payload: dict[str, object] | None = None
+        latency_ms: float | None = None
+        clock_skew_ms: int | None = None
+        error_message: str | None = None
+
+        meta_url = urljoin(f"{base_url}/", "api/device/meta")
+        health_url = urljoin(f"{base_url}/", "api/device/health")
+
+        try:
+            metadata_payload, latency_ms = _fetch_remote_json(meta_url, timeout=timeout)
+            remote_unix = metadata_payload.get("unixTimeMs")
+            if isinstance(remote_unix, (int, float)):
+                clock_skew_ms = int(remote_unix) - controller_unix_ms
+            try:
+                health_payload, _ = _fetch_remote_json(health_url, timeout=timeout)
+            except Exception as health_exc:  # pragma: no cover - defensive
+                LOGGER.debug("Device health fetch failed for %s: %s", base_url, health_exc)
+        except (requests.RequestException, ValueError) as exc:
+            LOGGER.warning("Handshake failed for %s: %s", base_url, exc)
+            error_message = str(exc)
+
+        db = get_db(app)
+        _ensure_scene_exists(db, scene_id)
+
+        persisted_id: str | None = None
+        device_payload = metadata_payload or {}
+        strips_payload = device_payload.get("strips")
+        if not isinstance(strips_payload, list):
+            strips_payload = []
+
+        if error_message is None:
+            device_id = (
+                device_payload.get("deviceId")
+                if isinstance(device_payload.get("deviceId"), str)
+                else data.get("deviceId")
+            )
+            if not isinstance(device_id, str) or not device_id.strip():
+                device_id = f"device-{uuid4().hex}"
+
+            persisted_id = _persist_device_graph(
+                db,
+                device_id=device_id,
+                scene_id=scene_id,
+                ip_address=ip_address,
+                position=data.get("position"),
+                device_type=device_payload.get("deviceType", "follower"),
+                strip_mode=device_payload.get("stripMode", "auto"),
+                strips=strips_payload,
+            )
+
+        capabilities_blob = (
+            device_payload.get("capabilities") if isinstance(device_payload, dict) else {}
+        )
+        if not isinstance(capabilities_blob, dict):
+            capabilities_blob = {}
+        playlist_hash = None
+        if isinstance(device_payload, dict):
+            playlist_hash = device_payload.get("playlistHash")
+        if not playlist_hash and isinstance(health_payload, dict):
+            playlist_hash = health_payload.get("playlistHash")
+
+        metadata_blob = {
+            "meta": metadata_payload,
+            "health": health_payload,
+        }
+
+        db.execute(
+            """
+            INSERT INTO device_handshakes (
+                id,
+                device_id,
+                ip_address,
+                hardware_id,
+                firmware_version,
+                capabilities,
+                strip_summary,
+                status,
+                clock_skew_ms,
+                responded_at,
+                error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            """,
+            (
+                handshake_id,
+                persisted_id,
+                ip_address,
+                device_payload.get("hardwareId") if isinstance(device_payload, dict) else None,
+                device_payload.get("firmwareVersion") if isinstance(device_payload, dict) else None,
+                json.dumps(capabilities_blob or {}),
+                json.dumps(strips_payload or []),
+                "success" if error_message is None else "failed",
+                clock_skew_ms,
+                error_message,
+            ),
+        )
+
+        if error_message is None and persisted_id:
+            db.execute(
+                """
+                INSERT INTO device_health (
+                    device_id,
+                    last_seen_at,
+                    last_heartbeat_at,
+                    last_latency_ms,
+                    clock_skew_ms,
+                    ws_connected,
+                    playlist_hash,
+                    metadata
+                ) VALUES (
+                    ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, 0, ?, ?
+                )
+                ON CONFLICT(device_id) DO UPDATE SET
+                    last_seen_at = CURRENT_TIMESTAMP,
+                    last_heartbeat_at = CURRENT_TIMESTAMP,
+                    last_latency_ms = excluded.last_latency_ms,
+                    clock_skew_ms = excluded.clock_skew_ms,
+                    playlist_hash = excluded.playlist_hash,
+                    metadata = excluded.metadata
+                """,
+                (
+                    persisted_id,
+                    int(latency_ms) if latency_ms is not None else None,
+                    int(clock_skew_ms) if clock_skew_ms is not None else None,
+                    playlist_hash,
+                    json.dumps(metadata_blob),
+                ),
+            )
+
+        db.commit()
+
+        if error_message is not None:
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "handshakeId": handshake_id,
+                        "message": error_message,
+                        "sceneId": scene_id,
+                        "ipAddress": ip_address,
+                    }
+                ),
+                502,
+            )
+
+        response_payload = {
+            "status": "ok",
+            "handshakeId": handshake_id,
+            "deviceId": persisted_id,
+            "sceneId": scene_id,
+            "ipAddress": ip_address,
+            "baseUrl": base_url,
+            "controllerClock": {
+                "iso": controller_iso,
+                "unixTimeMs": controller_unix_ms,
+            },
+            "clockSkewMs": clock_skew_ms,
+            "latencyMs": latency_ms,
+            "playlistHash": playlist_hash,
+            "device": metadata_payload,
+            "health": health_payload,
+            "strips": strips_payload,
+        }
+        return jsonify(response_payload), 201
+
+    @app.get("/api/v2/devices/<device_id>/status")
+    def get_device_status(device_id: str):
+        """Return last known status for a device."""
+        db = get_db(app)
+        health_row = db.execute(
+            """
+            SELECT device_id, last_seen_at, last_heartbeat_at, last_latency_ms, clock_skew_ms,
+                   ws_connected, playlist_hash, metadata
+            FROM device_health
+            WHERE device_id = ?
+            """,
+            (device_id,),
+        ).fetchone()
+        handshake_row = db.execute(
+            """
+            SELECT id, status, clock_skew_ms, responded_at, hardware_id, firmware_version,
+                   capabilities, strip_summary, error
+            FROM device_handshakes
+            WHERE device_id = ?
+            ORDER BY responded_at DESC
+            LIMIT 1
+            """,
+            (device_id,),
+        ).fetchone()
+        device_row = db.execute(
+            """
+            SELECT id, scene_id, ip_address, device_type, strip_mode
+            FROM devices
+            WHERE id = ?
+            """,
+            (device_id,),
+        ).fetchone()
+
+        metadata_blob = _safe_json_dict(health_row["metadata"]) if health_row else {}
+        last_seen_at = health_row["last_seen_at"] if health_row else None
+        parsed_seen = _parse_db_timestamp(last_seen_at)
+        online = False
+        if parsed_seen:
+            age = (
+                datetime.now(timezone.utc) - parsed_seen
+            ).total_seconds()
+            online = age <= app.config.get("DEVICE_HEALTH_MAX_AGE_SECONDS", 45)
+
+        handshake_payload = None
+        if handshake_row:
+            handshake_payload = {
+                "id": handshake_row["id"],
+                "status": handshake_row["status"],
+                "clockSkewMs": handshake_row["clock_skew_ms"],
+                "respondedAt": handshake_row["responded_at"],
+                "hardwareId": handshake_row["hardware_id"],
+                "firmwareVersion": handshake_row["firmware_version"],
+                "capabilities": _safe_json_dict(handshake_row["capabilities"]),
+                "strips": _safe_json_list(handshake_row["strip_summary"]),
+                "error": handshake_row["error"],
+            }
+
+        payload = {
+            "deviceId": device_id,
+            "sceneId": device_row["scene_id"] if device_row else None,
+            "ipAddress": device_row["ip_address"] if device_row else None,
+            "deviceType": device_row["device_type"] if device_row else None,
+            "stripMode": device_row["strip_mode"] if device_row else None,
+            "online": online,
+            "lastSeenAt": last_seen_at,
+            "lastLatencyMs": health_row["last_latency_ms"] if health_row else None,
+            "clockSkewMs": health_row["clock_skew_ms"] if health_row else None,
+            "wsConnected": bool(health_row["ws_connected"]) if health_row else False,
+            "playlistHash": health_row["playlist_hash"] if health_row else None,
+            "metadata": metadata_blob,
+            "handshake": handshake_payload,
+        }
+        return jsonify(payload)
+
+    @app.post("/api/v2/devices/<device_id>/commands")
+    def send_device_command(device_id: str):
+        """Send a realtime command to a device via WebSocket."""
+        request_payload = request.get_json(silent=True) or {}
+        command = request_payload.get("command")
+        if not isinstance(command, str) or not command.strip():
+            abort(400, description="command is required.")
+        command_payload = request_payload.get("payload")
+        if command_payload is None:
+            command_payload = {}
+        if not isinstance(command_payload, dict):
+            abort(400, description="payload must be an object.")
+
+        results = _send_ws_command(
+            command=command.strip(),
+            payload=command_payload,
+            device_ids=[device_id],
+        )
+        success = results.get(device_id, False)
+        status_code = 202 if success else 503
+        return (
+            jsonify(
+                {
+                    "deviceId": device_id,
+                    "command": command,
+                    "via": "websocket",
+                    "sent": success,
+                }
+            ),
+            status_code,
+        )
+
+    @app.post("/api/v2/devices/<device_id>/playlist")
+    def upload_device_playlist(device_id: str):
+        """Store a device-specific playlist and notify the device."""
+        payload = request.get_json(silent=True) or {}
+        entries = payload.get("entries")
+        if not isinstance(entries, list) or not entries:
+            abort(400, description="entries array is required.")
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            abort(400, description="metadata must be an object if provided.")
+        schedule = payload.get("schedule")
+        if schedule is not None and not isinstance(schedule, dict):
+            abort(400, description="schedule must be an object if provided.")
+
+        playlist_id = payload.get("id")
+        if not isinstance(playlist_id, str) or not playlist_id.strip():
+            playlist_id = f"playlist-{uuid4().hex}"
+        playlist_payload = {
+            "entries": entries,
+            "metadata": metadata or {},
+            "schedule": schedule or {},
+        }
+        playlist_hash = payload.get("playlistHash")
+        if not isinstance(playlist_hash, str) or not playlist_hash:
+            playlist_hash = _compute_playlist_hash(playlist_payload)
+        expires_at = payload.get("expiresAt")
+
+        db = get_db(app)
+        db.execute("DELETE FROM device_playlists WHERE device_id = ?", (device_id,))
+        db.execute(
+            """
+            INSERT INTO device_playlists (id, device_id, playlist_hash, payload, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (playlist_id, device_id, playlist_hash, json.dumps(playlist_payload), expires_at),
+        )
+        result = db.execute(
+            "UPDATE device_health SET playlist_hash = ? WHERE device_id = ?",
+            (playlist_hash, device_id),
+        )
+        if result.rowcount == 0:
+            db.execute(
+                """
+                INSERT INTO device_health (
+                    device_id,
+                    last_seen_at,
+                    last_heartbeat_at,
+                    last_latency_ms,
+                    clock_skew_ms,
+                    ws_connected,
+                    playlist_hash,
+                    metadata
+                ) VALUES (
+                    ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, 0, ?, ?
+                )
+                """,
+                (device_id, playlist_hash, json.dumps({"playlistHash": playlist_hash})),
+            )
+        db.commit()
+
+        _update_device_health_metadata(
+            device_id,
+            {"lastPlaylistUpload": _now_iso(), "playlistHash": playlist_hash},
+            ws_connected=None,
+        )
+
+        _maybe_dispatch_playlists([device_id])
+        download_url = url_for("download_device_playlist", device_id=device_id, _external=True)
+
+        return jsonify(
+            {
+                "id": playlist_id,
+                "playlistHash": playlist_hash,
+                "entries": len(entries),
+                "downloadUrl": download_url,
+            }
+        ), 201
+
+    @app.get("/api/v2/devices/<device_id>/playlist")
+    def get_device_playlist(device_id: str):
+        """Return the latest stored playlist for UI inspection."""
+        db = get_db(app)
+        row = db.execute(
+            """
+            SELECT id, playlist_hash, payload, created_at, downloaded_at
+            FROM device_playlists
+            WHERE device_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (device_id,),
+        ).fetchone()
+        if not row:
+            abort(404, description="No playlist stored for this device.")
+        playlist_payload = _safe_scene_data(row["payload"])
+        playlist_payload.update(
+            {
+                "id": row["id"],
+                "playlistHash": row["playlist_hash"],
+                "createdAt": row["created_at"],
+                "downloadedAt": row["downloaded_at"],
+            }
+        )
+        return jsonify(playlist_payload)
+
+    @app.get("/api/v2/devices/<device_id>/playlist/download")
+    def download_device_playlist(device_id: str):
+        """Allow devices to fetch and clear their pending playlist."""
+        db = get_db(app)
+        row = db.execute(
+            """
+            SELECT id, playlist_hash, payload
+            FROM device_playlists
+            WHERE device_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (device_id,),
+        ).fetchone()
+        if not row:
+            abort(404, description="No playlist available for download.")
+        playlist_payload = _safe_scene_data(row["payload"])
+        playlist_payload.update(
+            {
+                "id": row["id"],
+                "playlistHash": row["playlist_hash"],
+            }
+        )
+        db.execute(
+            """
+            UPDATE device_playlists
+            SET downloaded_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (row["id"],),
+        )
+        db.execute("DELETE FROM device_playlists WHERE id = ?", (row["id"],))
+        db.commit()
+        _update_device_health_metadata(
+            device_id, {"lastPlaylistDownload": _now_iso()}, ws_connected=None
+        )
+        return jsonify(playlist_payload)
+
+    if is_controller:
+
+        @sock.route("/ws/controller")
+        def controller_socket(ws):
+            """WebSocket endpoint for follower devices."""
+            device_id: str | None = None
+            try:
+                while True:
+                    raw_message = ws.receive()
+                    if raw_message is None:
+                        break
+                    try:
+                        message = json.loads(raw_message)
+                    except json.JSONDecodeError:
+                        ws.send(
+                            json.dumps(
+                                {"type": "error", "message": "Invalid JSON payload received."}
+                            )
+                        )
+                        continue
+
+                    message_type = message.get("type")
+                    if message_type == "hello":
+                        candidate = message.get("deviceId")
+                        if not isinstance(candidate, str) or not candidate.strip():
+                            ws.send(
+                                json.dumps(
+                                    {
+                                        "type": "error",
+                                        "message": "deviceId is required for hello handshake.",
+                                    }
+                                )
+                            )
+                            continue
+                        device_id = candidate.strip()
+                        _register_ws_client(device_id, ws, message)
+                        ws.send(
+                            json.dumps(
+                                {
+                                    "type": "ack",
+                                    "command": "hello",
+                                    "deviceId": device_id,
+                                    "controllerClock": _controller_clock_payload(),
+                                }
+                            )
+                        )
+                    elif message_type == "heartbeat":
+                        if not device_id:
+                            ws.send(
+                                json.dumps(
+                                    {"type": "error", "message": "Send hello before heartbeats."}
+                                )
+                            )
+                            continue
+                        payload = message.get("payload")
+                        heartbeat_payload = payload if isinstance(payload, dict) else {}
+                        _update_device_health_metadata(
+                            device_id,
+                            {"lastHeartbeat": heartbeat_payload},
+                            ws_connected=True,
+                        )
+                    elif message_type == "state":
+                        if not device_id:
+                            ws.send(
+                                json.dumps(
+                                    {"type": "error", "message": "Send hello before state updates."}
+                                )
+                            )
+                            continue
+                        state_payload = message.get("payload")
+                        state_payload = state_payload if isinstance(state_payload, dict) else {}
+                        _update_device_health_metadata(
+                            device_id,
+                            {"lastState": state_payload},
+                            ws_connected=True,
+                        )
+                    elif message_type == "log":
+                        LOGGER.info(
+                            "Device %s log: %s",
+                            device_id or "<unknown>",
+                            message.get("message"),
+                        )
+                    else:
+                        LOGGER.debug(
+                            "Unhandled WS message from %s: %s", device_id or "<unknown>", message
+                        )
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.warning("WebSocket error for device %s: %s", device_id, exc)
+            finally:
+                if device_id:
+                    _unregister_ws_client(device_id)
     
     @app.patch("/api/v2/devices/<device_id>")
     def update_device(device_id: str):
@@ -1685,11 +2820,16 @@ def create_app() -> Flask:
             (scene_id,),
         ).fetchone()
         
-        if not row:
-            # Scene doesn't exist in database, return default
-            return jsonify({"powerOn": False}), 200
-        
-        return jsonify({"powerOn": bool(row["power_on"])}), 200
+        stored_power = bool(row["power_on"]) if row else False
+        hardware_power = bool(app.config["LIGHT_STATE"]["is_on"])
+        power_value = hardware_power if app.config.get("IS_CONTROLLER", True) else stored_power
+        return jsonify(
+            {
+                "powerOn": power_value,
+                "storedPowerOn": stored_power,
+                "hardwarePowerOn": hardware_power,
+            }
+        ), 200
     
     @app.patch("/api/v2/scenes/<scene_id>/power")
     def update_scene_power(scene_id: str):
@@ -1698,7 +2838,8 @@ def create_app() -> Flask:
         if not data or "powerOn" not in data:
             abort(400, description="powerOn value required")
         
-        power_on = 1 if data["powerOn"] else 0
+        target_state = bool(data["powerOn"])
+        power_on = 1 if target_state else 0
         
         db = get_db(app)
         
@@ -1729,8 +2870,45 @@ def create_app() -> Flask:
             )
         
         db.commit()
-        
-        return jsonify({"powerOn": bool(power_on)})
+        if app.config.get("IS_CONTROLLER", True):
+            _set_light_power(target_state)
+            _send_ws_command(command="power", payload={"powerOn": target_state})
+            if target_state and not app.config.get("LIVE_MODE_ENABLED"):
+                _maybe_dispatch_playlists()
+        return jsonify(
+            {
+                "powerOn": bool(app.config["LIGHT_STATE"]["is_on"]),
+                "storedPowerOn": bool(power_on),
+            }
+        )
+
+    @app.get("/api/v2/live-mode")
+    def get_live_mode():
+        """Return whether live mode is active."""
+        return jsonify(
+            {
+                "enabled": bool(app.config.get("LIVE_MODE_ENABLED", False)),
+                "powerOn": bool(app.config["LIGHT_STATE"]["is_on"]),
+            }
+        )
+
+    @app.patch("/api/v2/live-mode")
+    def update_live_mode():
+        """Toggle live mode and notify devices."""
+        data = request.get_json(silent=True) or {}
+        if "enabled" not in data:
+            abort(400, description="enabled flag is required.")
+        enabled = bool(data["enabled"])
+        app.config["LIVE_MODE_ENABLED"] = enabled
+        _send_ws_command(command="live_mode", payload={"enabled": enabled})
+        if not enabled and app.config["LIGHT_STATE"]["is_on"]:
+            _maybe_dispatch_playlists()
+        return jsonify(
+            {
+                "enabled": enabled,
+                "powerOn": bool(app.config["LIGHT_STATE"]["is_on"]),
+            }
+        )
 
     @app.post("/api/v2/playback/<scene_id>/start")
     def start_scene_playback(scene_id: str):
@@ -1741,6 +2919,9 @@ def create_app() -> Flask:
             "startedAt": _now_iso(),
         }
         LOGGER.info("Playback started for scene %s", scene_id)
+        if not app.config.get("LIVE_MODE_ENABLED"):
+            _maybe_dispatch_playlists()
+        _send_ws_command(command="playlist_play", payload={"sceneId": scene_id})
         return jsonify(playback_state[scene_id])
 
     @app.post("/api/v2/playback/<scene_id>/stop")
@@ -1752,7 +2933,51 @@ def create_app() -> Flask:
             "stoppedAt": _now_iso(),
         }
         LOGGER.info("Playback stopped for scene %s", scene_id)
+        _send_ws_command(command="playlist_pause", payload={"sceneId": scene_id})
         return jsonify(playback_state[scene_id])
+
+    @app.post("/api/v2/devices/playback")
+    def control_device_playback():
+        """Play or pause playlists across devices."""
+        payload = request.get_json(silent=True) or {}
+        action = payload.get("action")
+        if action not in {"play", "pause"}:
+            abort(400, description="action must be 'play' or 'pause'.")
+        if app.config.get("LIVE_MODE_ENABLED"):
+            abort(409, description="Disable live mode before controlling playlists.")
+        if not app.config["LIGHT_STATE"]["is_on"]:
+            abort(409, description="Turn on power before controlling playlists.")
+
+        target_device_ids = payload.get("deviceIds")
+        if target_device_ids is not None:
+            if not isinstance(target_device_ids, list):
+                abort(400, description="deviceIds must be a list when provided.")
+            target_device_ids = [
+                device_id for device_id in target_device_ids if isinstance(device_id, str) and device_id.strip()
+            ]
+
+        playback_state = app.config.setdefault("PLAYBACK_STATE", {})
+        if action == "play":
+            _maybe_dispatch_playlists(target_device_ids)
+            _send_ws_command(
+                command="playlist_play",
+                payload={"deviceIds": target_device_ids},
+            )
+            playback_state["global"] = {
+                "status": "playing",
+                "startedAt": _now_iso(),
+            }
+        else:
+            _send_ws_command(
+                command="playlist_pause",
+                payload={"deviceIds": target_device_ids},
+            )
+            playback_state["global"] = {
+                "status": "paused",
+                "pausedAt": _now_iso(),
+            }
+
+        return jsonify(playback_state["global"]), 202
 
     @app.get("/patterns/configure")
     def configure_patterns() -> str:
@@ -1804,6 +3029,8 @@ def create_app() -> Flask:
                     selected = None
             if selected:
                 _apply_current_pattern()
+            if not app.config.get("LIVE_MODE_ENABLED"):
+                _maybe_dispatch_playlists()
         else:
             LOGGER.debug("Lights powered off; skipping pattern application.")
 
@@ -2281,6 +3508,7 @@ def create_app() -> Flask:
         """Handle a request to turn the lights on."""
         LOGGER.info("Received request to turn lights on.")
         _set_light_power(True)
+        _send_ws_command(command="power", payload={"powerOn": True})
         return redirect(url_for("index"))
 
     @app.post("/lights/off")
@@ -2288,6 +3516,7 @@ def create_app() -> Flask:
         """Handle a request to turn the lights off."""
         LOGGER.info("Received request to turn lights off.")
         _set_light_power(False)
+        _send_ws_command(command="power", payload={"powerOn": False})
         return redirect(url_for("index"))
 
     @app.post("/patterns/select")
@@ -2302,6 +3531,9 @@ def create_app() -> Flask:
         LOGGER.info("Received request to apply pattern: %s", pattern_id)
         _set_pattern(pattern_id)
         return redirect(url_for("index"))
+
+    if is_controller:
+        _start_health_poller()
 
     return app
 

@@ -26,6 +26,8 @@ import type {
   EditorMode,
   Point,
   ScenePlaylistEntry,
+  DeviceConnectionState,
+  DeviceHealth,
 } from "../types/editor";
 import { DEFAULT_SCENE, DEFAULT_TOTAL_DURATION } from "../constants/editor";
 import { useSceneStore } from "../state/sceneStore";
@@ -48,6 +50,72 @@ const createClientId = (prefix: string): string => {
     return `${prefix}-${crypto.randomUUID()}`;
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+};
+
+type SceneDeviceResponse = {
+  id: string;
+  position: Point;
+  ipAddress: string;
+  type: Device["type"];
+  stripMode: Device["stripMode"];
+  strips: LEDStrip[];
+  health?: DeviceHealth | null;
+};
+
+const deriveConnectionState = (
+  response: SceneDeviceResponse,
+  existing?: Device
+): { state: DeviceConnectionState; error: string | null } => {
+  const isWifi = (existing?.type ?? response.type) === "wifi";
+  const online = response.health?.online;
+
+  if (isWifi) {
+    if (existing?.connectionState === "connecting" && online !== true) {
+      return {
+        state: "connecting",
+        error: existing.connectionError ?? null,
+      };
+    }
+    if (online === true) {
+      return { state: "online", error: null };
+    }
+    if (online === false) {
+      return {
+        state: "error",
+        error: existing?.connectionError ?? "Device is offline",
+      };
+    }
+    return {
+      state: existing?.connectionState ?? "idle",
+      error: existing?.connectionError ?? null,
+    };
+  }
+
+  if (online === true) {
+    return { state: "online", error: null };
+  }
+  return {
+    state: existing?.connectionState ?? "idle",
+    error: existing?.connectionError ?? null,
+  };
+};
+
+const mergeDeviceFromResponse = (
+  response: SceneDeviceResponse,
+  existing?: Device
+): Device => {
+  const { state, error } = deriveConnectionState(response, existing);
+  return {
+    id: response.id,
+    position: response.position ?? existing?.position ?? { x: 400, y: 300 },
+    ipAddress: response.ipAddress ?? existing?.ipAddress ?? "",
+    strips: response.strips ?? existing?.strips ?? [],
+    type: response.type ?? existing?.type ?? "wifi",
+    stripMode: response.stripMode ?? existing?.stripMode ?? "auto",
+    connectionState: state,
+    connectionError: error,
+    health: response.health ?? existing?.health ?? null,
+  };
 };
 
 export const LEDSceneEditor: React.FC = () => {
@@ -75,6 +143,7 @@ export const LEDSceneEditor: React.FC = () => {
     runWithHistoryBatch,
     beginHistoryTransaction,
     endHistoryTransaction,
+    updateDevice,
   } = useSceneStore();
   const [mode, setMode] = useState<EditorMode>("view");
   const [tool, setTool] = useState<Tool>("select");
@@ -179,6 +248,64 @@ export const LEDSceneEditor: React.FC = () => {
         baseState: baseLedState,
       }),
     [baseLedState, currentScene.keyframes, timelinePosition]
+  );
+
+  const fetchSceneDevices = useCallback(
+    async (sceneIdOverride?: string) => {
+      const targetSceneId = sceneIdOverride ?? currentSceneId;
+      if (!targetSceneId) {
+        return;
+      }
+      try {
+        const response = await fetch(`/api/v2/scenes/${targetSceneId}/devices`);
+        if (!response.ok) {
+          return;
+        }
+        const data: SceneDeviceResponse[] = await response.json();
+        setScenes(
+          (prev) =>
+            prev.map((scene) => {
+              if (scene.id !== targetSceneId) {
+                return scene;
+              }
+              const existingMap = new Map(
+                scene.devices.map((device) => [device.id, device])
+              );
+              const mergedDevices = data.map((device) =>
+                mergeDeviceFromResponse(device, existingMap.get(device.id))
+              );
+              existingMap.forEach((device, deviceId) => {
+                if (!data.some((item) => item.id === deviceId)) {
+                  mergedDevices.push(device);
+                }
+              });
+              return {
+                ...scene,
+                devices: mergedDevices,
+              };
+            }),
+          { recordHistory: false }
+        );
+      } catch (error) {
+        console.error("Error loading devices:", error);
+      }
+    },
+    [currentSceneId, setScenes]
+  );
+
+  const setDeviceConnectionState = useCallback(
+    (deviceId: string, state: DeviceConnectionState, error: string | null = null) => {
+      updateDevice(deviceId, (device) => ({
+        ...device,
+        connectionState: state,
+        connectionError: error,
+        health:
+          state === "online"
+            ? { ...(device.health ?? {}), online: true }
+            : device.health,
+      }));
+    },
+    [updateDevice]
   );
   const ledMetadata = useMemo(() => {
     const map = new Map<
@@ -462,6 +589,26 @@ export const LEDSceneEditor: React.FC = () => {
 
     loadKeyframes();
   }, [currentScene.id, scenesBootstrapped, updateCurrentScene]);
+
+  useEffect(() => {
+    if (!scenesBootstrapped) {
+      return;
+    }
+    let intervalId: number | null = null;
+
+    const loadDevices = async () => {
+      await fetchSceneDevices(currentScene.id);
+    };
+
+    void loadDevices();
+    intervalId = window.setInterval(loadDevices, 15000);
+
+    return () => {
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [currentScene.id, scenesBootstrapped, fetchSceneDevices]);
 
   useEffect(() => {
     if (!powerOn || !liveMode) {
@@ -1529,6 +1676,9 @@ export const LEDSceneEditor: React.FC = () => {
       strips: [],
       type: "wifi",
       stripMode: "auto", // WiFi devices default to auto
+      connectionState: "idle",
+      connectionError: null,
+      health: null,
     };
 
     setScenes((prev) =>
@@ -1551,10 +1701,11 @@ export const LEDSceneEditor: React.FC = () => {
         },
         body: JSON.stringify(newDevice),
       });
+      await fetchSceneDevices(currentSceneId);
     } catch (error) {
       console.error("Error saving new device:", error);
     }
-  }, [currentSceneId]);
+  }, [currentSceneId, fetchSceneDevices, setScenes]);
 
   // Helper function to calculate center position (image center or viewport center)
   const calculateDefaultDevicePosition = useCallback((): Promise<Point> => {
@@ -1623,6 +1774,15 @@ export const LEDSceneEditor: React.FC = () => {
       strips: [],
       type: "local",
       stripMode: "auto",
+      connectionState: "online",
+      connectionError: null,
+      health: {
+        online: true,
+        lastSeenAt: null,
+        latencyMs: null,
+        clockSkewMs: null,
+        wsConnected: false,
+      },
     };
 
     // Update frontend state
@@ -1646,6 +1806,7 @@ export const LEDSceneEditor: React.FC = () => {
         },
         body: JSON.stringify(defaultDevice),
       });
+      await fetchSceneDevices(currentSceneId);
     } catch (error) {
       console.error("Error saving default device:", error);
     }
@@ -2789,35 +2950,87 @@ export const LEDSceneEditor: React.FC = () => {
   );
 
   const handleDeviceIpChange = useCallback(
-    async (deviceId: string, ipAddress: string) => {
-      setScenes((prev) =>
-        prev.map((scene) => {
-          if (scene.id !== currentSceneId) return scene;
-          return {
-            ...scene,
-            devices: scene.devices.map((device) =>
-              device.id === deviceId ? { ...device, ipAddress } : device
-            ),
-          };
-        })
-      );
-      
-      // Save to backend
+    (deviceId: string, ipAddress: string) => {
+      updateDevice(deviceId, (device) => ({
+        ...device,
+        ipAddress,
+        connectionState:
+          device.connectionState === "connecting" ? "connecting" : "idle",
+        connectionError: null,
+      }));
+    },
+    [updateDevice]
+  );
+
+  const handleDeviceConnect = useCallback(
+    async (deviceId: string) => {
+      const device = currentScene.devices.find((d) => d.id === deviceId);
+      if (!device || device.type !== "wifi") {
+        return;
+      }
+      const ipAddress = device.ipAddress.trim();
+      if (!ipAddress) {
+        setDeviceConnectionState(
+          deviceId,
+          "error",
+          "IP address is required before connecting."
+        );
+        return;
+      }
+
+      setDeviceConnectionState(deviceId, "connecting", null);
+
       try {
         await fetch(`/api/v2/devices/${deviceId}`, {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            ipAddress,
-          }),
+          body: JSON.stringify({ ipAddress }),
         });
       } catch (error) {
         console.error("Error saving device IP:", error);
+        setDeviceConnectionState(
+          deviceId,
+          "error",
+          "Failed to save IP address."
+        );
+        return;
+      }
+
+      try {
+        const response = await fetch(`/api/v2/devices/handshake`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sceneId: currentSceneId,
+            deviceId,
+            ipAddress,
+          }),
+        });
+        let payload: { status?: string; message?: string } | null = null;
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+        if (!response.ok || payload?.status === "error") {
+          throw new Error(payload?.message ?? "Device did not respond.");
+        }
+        await fetchSceneDevices(currentSceneId);
+        setDeviceConnectionState(deviceId, "online", null);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Failed to establish handshake.";
+        console.error("Handshake error:", error);
+        setDeviceConnectionState(deviceId, "error", message);
       }
     },
-    [currentSceneId]
+    [currentScene.devices, currentSceneId, fetchSceneDevices, setDeviceConnectionState]
   );
 
   const handleBackgroundImageScaleChange = useCallback(async (newScale: number) => {
@@ -3244,6 +3457,7 @@ export const LEDSceneEditor: React.FC = () => {
           onBackgroundImageScaleChange={handleBackgroundImageScaleChange}
           onDeviceTypeChange={handleDeviceTypeChange}
           onDeviceIpChange={handleDeviceIpChange}
+          onDeviceConnect={handleDeviceConnect}
           onDeviceStripModeChange={handleDeviceStripModeChange}
           onRemoveStrip={handleRemoveStrip}
           onUpdateStrip={handleUpdateStrip}

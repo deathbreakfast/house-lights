@@ -1,2 +1,4 @@
 Flask==3.0.2
+requests>=2.31.0
+flask-sock==0.7.0
 

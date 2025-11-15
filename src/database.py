@@ -126,6 +126,59 @@ def _init_db(db: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_leds_strip_id 
         ON leds(strip_id)
     """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS device_handshakes (
+            id TEXT PRIMARY KEY,
+            device_id TEXT,
+            ip_address TEXT,
+            hardware_id TEXT,
+            firmware_version TEXT,
+            capabilities TEXT,
+            strip_summary TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            clock_skew_ms INTEGER,
+            requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            responded_at TIMESTAMP,
+            error TEXT,
+            FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE SET NULL
+        )
+    """)
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_device_handshakes_device_id
+        ON device_handshakes(device_id)
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS device_health (
+            device_id TEXT PRIMARY KEY,
+            last_seen_at TIMESTAMP,
+            last_heartbeat_at TIMESTAMP,
+            last_latency_ms INTEGER,
+            clock_skew_ms INTEGER,
+            ws_connected INTEGER NOT NULL DEFAULT 0,
+            playlist_hash TEXT,
+            metadata TEXT,
+            FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+        )
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS device_playlists (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            playlist_hash TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            downloaded_at TIMESTAMP,
+            expires_at TIMESTAMP,
+            FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+        )
+    """)
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_device_playlists_device_hash
+        ON device_playlists(device_id, playlist_hash)
+    """)
     
     db.execute("""
         CREATE TABLE IF NOT EXISTS scene_keyframes (
