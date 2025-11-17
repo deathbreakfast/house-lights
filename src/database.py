@@ -13,7 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 def get_db(app: Flask) -> sqlite3.Connection:
-    """Get or create database connection."""
+    """
+    Get or create database connection.
+    
+    Connection is automatically reused within the same Flask request context
+    via Flask's 'g' object and closed at the end of the request.
+    """
     if "db" not in g:
         db_path = app.config.get("DATABASE_PATH")
         if not db_path:
@@ -21,7 +26,8 @@ def get_db(app: Flask) -> sqlite3.Connection:
             db_dir = Path.home() / ".houselights"
             db_dir.mkdir(parents=True, exist_ok=True)
             db_path = db_dir / "houselights_v2.db"
-        logger.debug("Opening database connection at %s", db_path)
+        # Connection is created once per request and reused via Flask's g object
+        # No need to log every connection - it's expected behavior
         g.db = sqlite3.connect(str(db_path), check_same_thread=False)
         g.db.row_factory = sqlite3.Row
         _init_db(g.db)
@@ -110,15 +116,33 @@ def _init_db(db: sqlite3.Connection) -> None:
         )
     """)
     
-    db.execute("""
-        CREATE INDEX IF NOT EXISTS idx_background_images_scene_id 
-        ON background_images(scene_id)
-    """)
+    # These indexes are only created if scene_id columns exist (before migration)
+    # They will be dropped during migration if they exist
+    try:
+        # Check if table exists and has scene_id column
+        bg_info = db.execute("PRAGMA table_info(background_images)").fetchall()
+        if bg_info:  # Table exists
+            bg_columns = [row[1] for row in bg_info]
+            if "scene_id" in bg_columns:
+                db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_background_images_scene_id 
+                    ON background_images(scene_id)
+                """)
+    except sqlite3.OperationalError:
+        pass
     
-    db.execute("""
-        CREATE INDEX IF NOT EXISTS idx_devices_scene_id 
-        ON devices(scene_id)
-    """)
+    try:
+        # Check if table exists and has scene_id column
+        devices_info = db.execute("PRAGMA table_info(devices)").fetchall()
+        if devices_info:  # Table exists
+            device_columns = [row[1] for row in devices_info]
+            if "scene_id" in device_columns:
+                db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_devices_scene_id 
+                    ON devices(scene_id)
+                """)
+    except sqlite3.OperationalError:
+        pass
     
     db.execute("""
         CREATE INDEX IF NOT EXISTS idx_led_strips_device_id 
@@ -239,6 +263,85 @@ def _init_db(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE background_images ADD COLUMN scale INTEGER DEFAULT 100")
     except sqlite3.OperationalError:
         # Column already exists, ignore
+        pass
+    
+    # Migration: Remove scene_id from devices table (global devices)
+    try:
+        # Check if scene_id column exists
+        devices_info = db.execute("PRAGMA table_info(devices)").fetchall()
+        device_columns = [row[1] for row in devices_info]
+        if "scene_id" in device_columns:
+            # Create new table without scene_id
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS devices_new (
+                    id TEXT PRIMARY KEY,
+                    position_x REAL NOT NULL,
+                    position_y REAL NOT NULL,
+                    ip_address TEXT NOT NULL,
+                    device_type TEXT NOT NULL,
+                    strip_mode TEXT NOT NULL DEFAULT 'auto',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Copy existing data (keep most recent device per device_id)
+            db.execute("""
+                INSERT INTO devices_new (id, position_x, position_y, ip_address, 
+                                       device_type, strip_mode, created_at, updated_at)
+                SELECT id, position_x, position_y, ip_address, device_type, strip_mode,
+                       MIN(created_at) as created_at, MAX(updated_at) as updated_at
+                FROM devices
+                GROUP BY id
+            """)
+            # Drop old table and rename
+            db.execute("DROP TABLE devices")
+            db.execute("ALTER TABLE devices_new RENAME TO devices")
+            # Drop old index
+            try:
+                db.execute("DROP INDEX IF EXISTS idx_devices_scene_id")
+            except sqlite3.OperationalError:
+                pass
+    except sqlite3.OperationalError:
+        # Migration already applied or table doesn't exist yet
+        pass
+    
+    # Migration: Remove scene_id from background_images table (global background)
+    try:
+        # Check if scene_id column exists
+        bg_info = db.execute("PRAGMA table_info(background_images)").fetchall()
+        bg_columns = [row[1] for row in bg_info]
+        if "scene_id" in bg_columns:
+            # Create new table without scene_id
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS background_images_new (
+                    id TEXT PRIMARY KEY,
+                    filename TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    scale INTEGER DEFAULT 100,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Copy existing data (keep studio background or most recent)
+            db.execute("""
+                INSERT INTO background_images_new (id, filename, content_type, file_path, scale, created_at)
+                SELECT id, filename, content_type, file_path, scale, created_at
+                FROM background_images
+                ORDER BY 
+                    CASE WHEN scene_id = '__studio_background__' THEN 0 ELSE 1 END,
+                    created_at DESC
+                LIMIT 1
+            """)
+            # Drop old table and rename
+            db.execute("DROP TABLE background_images")
+            db.execute("ALTER TABLE background_images_new RENAME TO background_images")
+            # Drop old index
+            try:
+                db.execute("DROP INDEX IF EXISTS idx_background_images_scene_id")
+            except sqlite3.OperationalError:
+                pass
+    except sqlite3.OperationalError:
+        # Migration already applied or table doesn't exist yet
         pass
     
     db.commit()

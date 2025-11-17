@@ -1,4 +1,5 @@
-import type { Keyframe, Scene } from "../types/editor";
+import type React from "react";
+import type { Keyframe, Scene, Device } from "../types/editor";
 
 export type LedState = {
   color: string;
@@ -45,9 +46,9 @@ const applyKeyframeToState = (
   return next;
 };
 
-export const buildSceneLedState = (scene: Scene): LedStateMap => {
+export const buildSceneLedState = (devices: Device[]): LedStateMap => {
   const state: LedStateMap = {};
-  scene.devices.forEach((device) => {
+  devices.forEach((device) => {
     device.strips.forEach((strip) => {
       strip.leds.forEach((led) => {
         state[led.id] = {
@@ -62,6 +63,45 @@ export const buildSceneLedState = (scene: Scene): LedStateMap => {
 
 export const sortKeyframes = (keyframes: Keyframe[]): Keyframe[] =>
   [...keyframes].sort((a, b) => a.timestamp - b.timestamp);
+
+/**
+ * Finds a keyframe at a given click position (clientX) within a threshold distance.
+ * @param clientX - The x coordinate of the click in client space
+ * @param timelineRef - Reference to the timeline DOM element
+ * @param keyframes - Array of keyframes to search
+ * @param timelineWindowStart - Start position of visible timeline window (percentage)
+ * @param timelineWindowWidth - Width of visible timeline window (percentage)
+ * @param totalDuration - Total duration of the timeline in milliseconds
+ * @param threshold - Distance threshold in pixels (default: 10)
+ * @returns The keyframe if found within threshold, null otherwise
+ */
+export const findKeyframeAtPosition = (
+  clientX: number,
+  timelineRef: React.RefObject<HTMLDivElement>,
+  keyframes: Keyframe[],
+  timelineWindowStart: number,
+  timelineWindowWidth: number,
+  totalDuration: number,
+  threshold: number = 10
+): Keyframe | null => {
+  const timeline = timelineRef.current;
+  if (!timeline) return null;
+  
+  const rect = timeline.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const percentage = Math.max(0, Math.min(1, x / rect.width));
+  
+  const visibleStart = (timelineWindowStart / 100) * totalDuration;
+  const visibleEnd = visibleStart + (timelineWindowWidth / 100) * totalDuration;
+  const visibleDuration = visibleEnd - visibleStart;
+  const clickedTimestamp = visibleStart + percentage * visibleDuration;
+  
+  return keyframes.find((kf) => {
+    const kfX = ((kf.timestamp - visibleStart) / visibleDuration) * rect.width;
+    const clickedX = ((clickedTimestamp - visibleStart) / visibleDuration) * rect.width;
+    return Math.abs(kfX - clickedX) < threshold;
+  }) || null;
+};
 
 const KEYFRAME_TIMESTAMP_TOLERANCE_MS = 1;
 

@@ -39,6 +39,10 @@ interface TimelineContainerProps {
     type: "left" | "right" | "middle"
   ) => void;
   onKeyframeSelect?: (keyframe: Keyframe) => void;
+  onKeyframeDragStart?: (keyframeId: string, event: React.MouseEvent) => void;
+  onKeyframeDrag?: (event: React.MouseEvent) => void;
+  onKeyframeDragEnd?: () => void;
+  isDraggingKeyframe?: boolean;
 }
 
 export const TimelineContainer: React.FC<TimelineContainerProps> = ({
@@ -67,6 +71,10 @@ export const TimelineContainer: React.FC<TimelineContainerProps> = ({
   onPlayheadMouseDown,
   onSliderMouseDown,
   onKeyframeSelect,
+  onKeyframeDragStart,
+  onKeyframeDrag,
+  onKeyframeDragEnd,
+  isDraggingKeyframe = false,
 }) => {
   const playheadPercent = useMemo(() => {
     const visibleStart = (timelineWindowStart / 100) * totalDuration;
@@ -169,7 +177,8 @@ export const TimelineContainer: React.FC<TimelineContainerProps> = ({
 
           <div
             ref={timelineRef}
-            className="h-12 relative bg-[#0f0f0f] rounded-t-lg overflow-hidden cursor-crosshair border border-white/10 border-b-0"
+            className="h-12 relative bg-[#0f0f0f] rounded-t-lg overflow-hidden border border-white/10 border-b-0"
+            style={{ cursor: isDraggingKeyframe ? "grabbing" : "crosshair" }}
             onClick={onTimelineClick}
             onMouseDown={onTimelineMouseDown}
             onMouseUp={onTimelineMouseUp}
@@ -184,6 +193,10 @@ export const TimelineContainer: React.FC<TimelineContainerProps> = ({
               selectedKeyframeId={selectedKeyframeId}
               showPropertiesPanel={showPropertiesPanel}
               onKeyframeClick={onKeyframeSelect}
+              onKeyframeDragStart={onKeyframeDragStart}
+              onKeyframeDrag={onKeyframeDrag}
+              onKeyframeDragEnd={onKeyframeDragEnd}
+              isDraggingKeyframe={isDraggingKeyframe}
             />
           </div>
 

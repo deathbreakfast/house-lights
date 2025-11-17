@@ -43,6 +43,13 @@ export const useTimelinePlayer = ({
   const isPlayingRef = useRef(false);
   const audioElement = audioRef?.current ?? null;
 
+  // Sync framerate when initialFramerate changes (e.g., when scene loads)
+  useEffect(() => {
+    if (initialFramerate && initialFramerate !== framerate) {
+      setFramerate(initialFramerate);
+    }
+  }, [initialFramerate, framerate]);
+
   useEffect(() => {
     frameDurationRef.current = 1000 / framerate;
   }, [framerate]);

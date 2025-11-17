@@ -1,16 +1,20 @@
 import React, {
   RefObject,
-  useEffect,
+  useLayoutEffect,
+  useRef,
+  useMemo,
   MouseEvent as ReactMouseEvent,
   TouchEvent as ReactTouchEvent,
 } from "react";
-import type { Scene, Point, Tool, EditorMode } from "../../types/editor";
+import type { Scene, Point, Tool, EditorMode, Device } from "../../types/editor";
 import { renderCanvas, type RenderOptions } from "./CanvasRenderer";
 import type { LedStateMap } from "../../utils/timeline";
+import { buildSceneLedState } from "../../utils/timeline";
 
 interface SceneViewerProps {
   canvasRef: RefObject<HTMLCanvasElement>;
   scene: Scene;
+  devices: Device[];
   frameLedState?: LedStateMap;
   backgroundImage: string | null;
   backgroundImageScale: number;
@@ -34,6 +38,7 @@ interface SceneViewerProps {
 export const SceneViewer: React.FC<SceneViewerProps> = ({
   canvasRef,
   scene,
+  devices,
   frameLedState,
   backgroundImage,
   backgroundImageScale,
@@ -53,17 +58,59 @@ export const SceneViewer: React.FC<SceneViewerProps> = ({
   onCanvasTouchEnd,
   onZoomChange,
 }) => {
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+  const prevSceneIdRef = useRef<string | null>(null);
+  const isFirstRenderRef = useRef(true);
 
+  // Use frameLedState directly (devices are now global, so validation is handled at buildSceneLedState level)
+  const effectiveFrameLedState = useMemo(() => {
+    // If frameLedState is undefined, compute from global devices
+    if (!frameLedState) {
+      return buildSceneLedState(devices);
+    }
+    // Use frameLedState directly - it should already be consistent with global devices
+    return frameLedState;
+  }, [devices, frameLedState]);
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      console.log("[SceneViewer] useLayoutEffect: no canvas");
+      return;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      console.log("[SceneViewer] useLayoutEffect: no ctx");
+      return;
+    }
+
+    const sceneChanged = prevSceneIdRef.current !== scene.id;
+
+    console.log("[SceneViewer] useLayoutEffect running", {
+      sceneId: scene.id,
+      prevSceneId: prevSceneIdRef.current,
+      sceneChanged,
+      isFirstRender: isFirstRenderRef.current,
+      effectiveFrameLedStateKeys: Object.keys(effectiveFrameLedState).length,
+      deviceCount: devices.length,
+    });
+
+    // Track scene changes
+    if (isFirstRenderRef.current) {
+      isFirstRenderRef.current = false;
+      prevSceneIdRef.current = scene.id;
+      console.log("[SceneViewer] First render, setting prevSceneId:", scene.id);
+    } else if (sceneChanged) {
+      console.log("[SceneViewer] Scene changed from", prevSceneIdRef.current, "to", scene.id);
+      prevSceneIdRef.current = scene.id;
+    }
+
+    // Use effectiveFrameLedState which is guaranteed to match current devices
     const options: RenderOptions = {
       canvas,
       ctx,
       scene,
-      frameLedState,
+      devices,
+      frameLedState: effectiveFrameLedState,
       backgroundImage,
       backgroundImageScale,
       canvasZoom,
@@ -73,11 +120,15 @@ export const SceneViewer: React.FC<SceneViewerProps> = ({
       powerOn,
     };
 
+    console.log("[SceneViewer] Calling renderCanvas", {
+      sceneId: scene.id,
+      frameLedStateEntries: Object.keys(effectiveFrameLedState).length,
+    });
     renderCanvas(options);
   }, [
     canvasRef,
     scene,
-    frameLedState,
+    effectiveFrameLedState,
     backgroundImage,
     backgroundImageScale,
     canvasZoom,

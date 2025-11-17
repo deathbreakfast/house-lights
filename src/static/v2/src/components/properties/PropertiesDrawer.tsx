@@ -182,14 +182,14 @@ export const PropertiesDrawer: React.FC<PropertiesDrawerProps> = ({
                     IP Address
                   </label>
                   <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={selectedDevice.type === "virtual" ? "N/A" : selectedDevice.ipAddress}
-                      onChange={(event) => {
-                        if (selectedDevice.type !== "local" && selectedDevice.type !== "virtual") {
-                          onDeviceIpChange(selectedDeviceId, event.target.value);
-                        }
-                      }}
+                  <input
+                    type="text"
+                    value={selectedDevice.type === "virtual" ? "N/A" : selectedDevice.ipAddress}
+                    onChange={(event) => {
+                      if (selectedDevice.type !== "local" && selectedDevice.type !== "virtual") {
+                        onDeviceIpChange(selectedDeviceId, event.target.value);
+                      }
+                    }}
                       onBlur={() => {
                         if (selectedDevice.type === "wifi") {
                           onDeviceConnect(selectedDeviceId);
@@ -202,14 +202,14 @@ export const PropertiesDrawer: React.FC<PropertiesDrawerProps> = ({
                           (event.target as HTMLInputElement).blur();
                         }
                       }}
-                      disabled={selectedDevice.type === "local" || selectedDevice.type === "virtual"}
-                      placeholder={selectedDevice.type === "virtual" ? "N/A" : "192.168.1.100"}
+                    disabled={selectedDevice.type === "local" || selectedDevice.type === "virtual"}
+                    placeholder={selectedDevice.type === "virtual" ? "N/A" : "192.168.1.100"}
                       className={`flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/20 text-white ${
                         selectedDevice.type === "local" || selectedDevice.type === "virtual"
-                          ? "opacity-50 cursor-not-allowed"
-                          : ""
-                      }`}
-                    />
+                        ? "opacity-50 cursor-not-allowed"
+                        : ""
+                    }`}
+                  />
                     {selectedDevice.type === "wifi" ? (
                       <button
                         type="button"

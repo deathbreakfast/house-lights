@@ -1,5 +1,6 @@
 import React from "react";
 import { motion } from "framer-motion";
+import { GripVertical } from "lucide-react";
 import type { Keyframe } from "../../types/editor";
 
 interface TimelineKeyframesProps {
@@ -11,6 +12,10 @@ interface TimelineKeyframesProps {
   selectedKeyframeId: string | null;
   showPropertiesPanel: boolean;
   onKeyframeClick?: (keyframe: Keyframe) => void;
+  onKeyframeDragStart?: (keyframeId: string, event: React.MouseEvent) => void;
+  onKeyframeDrag?: (event: React.MouseEvent) => void;
+  onKeyframeDragEnd?: () => void;
+  isDraggingKeyframe?: boolean;
 }
 
 export const TimelineKeyframes: React.FC<TimelineKeyframesProps> = ({
@@ -22,13 +27,17 @@ export const TimelineKeyframes: React.FC<TimelineKeyframesProps> = ({
   selectedKeyframeId,
   showPropertiesPanel,
   onKeyframeClick,
+  onKeyframeDragStart,
+  onKeyframeDrag,
+  onKeyframeDragEnd,
+  isDraggingKeyframe = false,
 }) => {
   const visibleStart = (timelineWindowStart / 100) * totalDuration;
   const visibleEnd = visibleStart + (timelineWindowWidth / 100) * totalDuration;
   const visibleDuration = visibleEnd - visibleStart;
 
   return (
-    <div className="absolute inset-0">
+    <div className="absolute inset-0 pointer-events-none">
       <div className="w-full h-full bg-gradient-to-r from-blue-500/5 to-purple-500/5 relative">
         {keyframes.map((keyframe) => {
           if (keyframe.timestamp < visibleStart || keyframe.timestamp > visibleEnd) {
@@ -37,27 +46,51 @@ export const TimelineKeyframes: React.FC<TimelineKeyframesProps> = ({
           const position =
             ((keyframe.timestamp - visibleStart) / visibleDuration) * 100;
           const isSelected = showPropertiesPanel && selectedKeyframeId === keyframe.id;
-          const isNearPlayhead =
-            showPropertiesPanel &&
-            Math.abs(keyframe.timestamp - timelinePosition) < 100;
+          const canDrag = isSelected && !isDraggingKeyframe;
+          
           return (
             <motion.div
               key={keyframe.id}
-              style={{ left: `${position}%` }}
-              onClick={(event) => {
-                event.stopPropagation();
-                onKeyframeClick?.(keyframe);
-              }}
-              className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 cursor-pointer transition-colors ${
-                isSelected ? "rotate-0" : "rotate-45"
-              } ${
-                isNearPlayhead
-                  ? "bg-yellow-400"
-                  : isSelected
-                  ? "bg-blue-500"
-                  : "bg-blue-400"
-              }`}
-            />
+              data-keyframe={keyframe.id}
+              style={{ left: `${position}%`, pointerEvents: "auto", zIndex: 30 }}
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 flex items-center justify-center"
+            >
+              {/* Keyframe indicator */}
+              <div
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onKeyframeClick?.(keyframe);
+                }}
+                onMouseDown={(event) => {
+                  // Always stop propagation to prevent timeline/playhead from handling the event
+                  event.stopPropagation();
+                }}
+                className={`w-3 h-3 transition-colors ${
+                  isSelected ? "rotate-0" : "rotate-45"
+                } ${
+                  isSelected
+                    ? "bg-yellow-400"
+                    : "bg-blue-400"
+                } ${canDrag ? "cursor-pointer" : "cursor-pointer"}`}
+              />
+              
+              {/* Drag handle - only visible when selected and draggable */}
+              {canDrag && (
+                <div
+                  data-keyframe-drag-handle={keyframe.id}
+                  onMouseDown={(event) => {
+                    // Always stop propagation to prevent timeline/playhead from handling the event
+                    event.stopPropagation();
+                    event.preventDefault();
+                    onKeyframeDragStart?.(keyframe.id, event);
+                  }}
+                  className="absolute -right-2 top-1/2 -translate-y-1/2 cursor-grab active:cursor-grabbing opacity-60 hover:opacity-100 transition-opacity z-40"
+                  title="Drag to move keyframe"
+                >
+                  <GripVertical size={12} className="text-white" />
+                </div>
+              )}
+            </motion.div>
           );
         })}
       </div>

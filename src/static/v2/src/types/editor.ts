@@ -60,13 +60,11 @@ export type Keyframe = {
 export type Scene = {
   id: string;
   name: string;
-  devices: Device[];
   keyframes: Keyframe[];
   audioUrl?: string;
   audioFileName?: string;
   durationMs?: number;
-  backgroundImage?: string;
-  backgroundImageScale?: number; // Scale as percentage (100 = 100%, 400 = 400%)
+  framerate?: number; // Frames per second for timeline playback
 };
 
 export type Tool =

@@ -1,10 +1,11 @@
-import type { Scene, Point } from "../../types/editor";
+import type { Scene, Point, Device } from "../../types/editor";
 import type { LedStateMap } from "../../utils/timeline";
 
 export interface RenderOptions {
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
   scene: Scene;
+  devices: Device[];
   frameLedState?: LedStateMap;
   backgroundImage: string | null;
   backgroundImageScale: number;
@@ -18,7 +19,7 @@ export interface RenderOptions {
 export const drawDevicesAndLEDs = (options: RenderOptions) => {
   const {
     ctx,
-    scene,
+    devices,
     canvasZoom,
     canvasPan,
     selectedDeviceId,
@@ -60,7 +61,7 @@ export const drawDevicesAndLEDs = (options: RenderOptions) => {
     },
   };
 
-  scene.devices.forEach((device) => {
+  devices.forEach((device) => {
     const stateKey =
       device.connectionState ??
       (device.health?.online ? "online" : "idle");

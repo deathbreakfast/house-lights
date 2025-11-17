@@ -1,0 +1,2 @@
+"""Background image management module."""
+
