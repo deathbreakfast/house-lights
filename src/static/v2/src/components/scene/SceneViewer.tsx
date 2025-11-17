@@ -74,33 +74,20 @@ export const SceneViewer: React.FC<SceneViewerProps> = ({
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) {
-      console.log("[SceneViewer] useLayoutEffect: no canvas");
       return;
     }
     const ctx = canvas.getContext("2d");
     if (!ctx) {
-      console.log("[SceneViewer] useLayoutEffect: no ctx");
       return;
     }
 
     const sceneChanged = prevSceneIdRef.current !== scene.id;
 
-    console.log("[SceneViewer] useLayoutEffect running", {
-      sceneId: scene.id,
-      prevSceneId: prevSceneIdRef.current,
-      sceneChanged,
-      isFirstRender: isFirstRenderRef.current,
-      effectiveFrameLedStateKeys: Object.keys(effectiveFrameLedState).length,
-      deviceCount: devices.length,
-    });
-
     // Track scene changes
     if (isFirstRenderRef.current) {
       isFirstRenderRef.current = false;
       prevSceneIdRef.current = scene.id;
-      console.log("[SceneViewer] First render, setting prevSceneId:", scene.id);
     } else if (sceneChanged) {
-      console.log("[SceneViewer] Scene changed from", prevSceneIdRef.current, "to", scene.id);
       prevSceneIdRef.current = scene.id;
     }
 
@@ -120,10 +107,6 @@ export const SceneViewer: React.FC<SceneViewerProps> = ({
       powerOn,
     };
 
-    console.log("[SceneViewer] Calling renderCanvas", {
-      sceneId: scene.id,
-      frameLedStateEntries: Object.keys(effectiveFrameLedState).length,
-    });
     renderCanvas(options);
   }, [
     canvasRef,

@@ -881,10 +881,6 @@ export const useCanvasInteractions = ({
         const device = devices.find((d) => d.id === selectedDeviceId);
         if (device) {
           try {
-            console.log("Saving device position:", {
-              deviceId: selectedDeviceId,
-              position: device.position,
-            });
             const response = await fetch(`/api/v2/devices/${selectedDeviceId}`, {
               method: "PATCH",
               headers: {
@@ -901,8 +897,6 @@ export const useCanvasInteractions = ({
                 `Error saving device position: ${response.status}`,
                 new Error(errorText)
               );
-            } else {
-              console.log("Device position saved successfully");
             }
           } catch (error) {
             console.error("Error saving device position:", error);

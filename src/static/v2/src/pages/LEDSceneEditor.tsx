@@ -235,7 +235,6 @@ export const LEDSceneEditor: React.FC = () => {
   // Save framerate to scene when it changes (both local state and backend)
   const setFramerateWithSave = useCallback(
     (newFramerate: number) => {
-      console.log("setFramerateWithSave called with:", newFramerate);
       setFramerate(newFramerate);
       updateCurrentScene((scene) => ({
         ...scene,
@@ -253,8 +252,6 @@ export const LEDSceneEditor: React.FC = () => {
         .then((response) => {
           if (!response.ok) {
             console.error("Error saving framerate:", response.status, response.statusText);
-          } else {
-            console.log("Framerate saved successfully");
           }
         })
         .catch((error) => {
@@ -277,23 +274,6 @@ export const LEDSceneEditor: React.FC = () => {
   const baseLedState = useMemo(
     () => {
       const state = buildSceneLedState(devices);
-      const totalLeds = devices.reduce(
-        (sum, device) =>
-          sum +
-          device.strips.reduce(
-            (stripSum, strip) => stripSum + strip.leds.length,
-            0
-          ),
-        0
-      );
-      console.log("[LEDSceneEditor] baseLedState recalculating", {
-        sceneId: currentScene.id,
-        sceneName: currentScene.name,
-        deviceCount: devices.length,
-        baseLedStateKeys: Object.keys(state).length,
-        totalLedsInScene: totalLeds,
-        hasDevicesButNoLeds: devices.length > 0 && totalLeds === 0,
-      });
       return state;
     },
     [currentScene.id, currentScene.name, devices]
@@ -305,11 +285,6 @@ export const LEDSceneEditor: React.FC = () => {
         keyframes: currentScene.keyframes,
         timelinePosition,
         baseState: baseLedState,
-      });
-      console.log("[LEDSceneEditor] frameLedState recalculating", {
-        sceneId: currentScene.id,
-        frameLedStateKeys: Object.keys(state).length,
-        baseLedStateKeys: Object.keys(baseLedState).length,
       });
       return state;
     },
