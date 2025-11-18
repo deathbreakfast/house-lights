@@ -1,7 +1,7 @@
 /** Hook for managing timeline interactions: click, drag, slider handlers. */
 
 import { useCallback, useEffect } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, TouchEvent as ReactTouchEvent } from "react";
 import type { Keyframe, Scene } from "../types/editor";
 
 type UseTimelineInteractionsOptions = {
@@ -101,6 +101,45 @@ export const useTimelineInteractions = ({
     [handleTimelinePointer, setIsDraggingTimeline]
   );
 
+  const handleTimelineTouchStart = useCallback(
+    (event: ReactTouchEvent<HTMLDivElement>) => {
+      if (event.touches.length === 1) {
+        event.preventDefault();
+        const touch = event.touches[0];
+        setIsDraggingTimeline(true);
+        handleTimelinePointer(touch.clientX, { focusKeyframe: true });
+      }
+    },
+    [handleTimelinePointer, setIsDraggingTimeline]
+  );
+
+  const handlePlayheadTouchStart = useCallback(
+    (event: ReactTouchEvent<HTMLDivElement>) => {
+      if (event.touches.length === 1) {
+        event.preventDefault();
+        event.stopPropagation();
+        const touch = event.touches[0];
+        setIsDraggingTimeline(true);
+        handleTimelinePointer(touch.clientX, { focusKeyframe: false });
+      }
+    },
+    [handleTimelinePointer, setIsDraggingTimeline]
+  );
+
+  const handleSliderTouchStart = useCallback(
+    (
+      event: ReactTouchEvent<HTMLDivElement>,
+      type: "left" | "right" | "middle"
+    ) => {
+      if (event.touches.length === 1) {
+        event.preventDefault();
+        event.stopPropagation();
+        sliderHandlers.beginDrag(type);
+      }
+    },
+    [sliderHandlers]
+  );
+
   // Slider drag effect
   useEffect(() => {
     if (isDraggingSlider) {
@@ -110,11 +149,24 @@ export const useTimelineInteractions = ({
         sliderHandlers.onMouseMove(event.clientX, rect);
       };
       const handleMouseUp = () => sliderHandlers.endDrag();
+      const handleTouchMove = (event: TouchEvent) => {
+        if (event.touches.length === 1) {
+          event.preventDefault();
+          const rect = sliderRef.current?.getBoundingClientRect();
+          if (!rect) return;
+          sliderHandlers.onMouseMove(event.touches[0].clientX, rect);
+        }
+      };
+      const handleTouchEnd = () => sliderHandlers.endDrag();
       window.addEventListener("mousemove", handleMouseMove);
       window.addEventListener("mouseup", handleMouseUp);
+      window.addEventListener("touchmove", handleTouchMove, { passive: false });
+      window.addEventListener("touchend", handleTouchEnd);
       return () => {
         window.removeEventListener("mousemove", handleMouseMove);
         window.removeEventListener("mouseup", handleMouseUp);
+        window.removeEventListener("touchmove", handleTouchMove);
+        window.removeEventListener("touchend", handleTouchEnd);
       };
     }
   }, [isDraggingSlider, sliderHandlers, sliderRef]);
@@ -129,12 +181,25 @@ export const useTimelineInteractions = ({
 
     const handleMouseUp = () => setIsDraggingTimeline(false);
 
+    const handleTouchMove = (event: TouchEvent) => {
+      if (event.touches.length === 1) {
+        event.preventDefault();
+        handleTimelinePointer(event.touches[0].clientX, { focusKeyframe: false });
+      }
+    };
+
+    const handleTouchEnd = () => setIsDraggingTimeline(false);
+
     window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mouseup", handleMouseUp);
+    window.addEventListener("touchmove", handleTouchMove, { passive: false });
+    window.addEventListener("touchend", handleTouchEnd);
 
     return () => {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
+      window.removeEventListener("touchmove", handleTouchMove);
+      window.removeEventListener("touchend", handleTouchEnd);
     };
   }, [handleTimelinePointer, isDraggingTimeline, setIsDraggingTimeline]);
 
@@ -144,6 +209,9 @@ export const useTimelineInteractions = ({
     handlePlayheadMouseDown,
     handleSliderMouseDown,
     handleTimelinePointer,
+    handleTimelineTouchStart,
+    handlePlayheadTouchStart,
+    handleSliderTouchStart,
   };
 };
 

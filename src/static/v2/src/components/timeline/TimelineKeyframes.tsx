@@ -78,11 +78,28 @@ export const TimelineKeyframes: React.FC<TimelineKeyframesProps> = ({
               {canDrag && (
                 <div
                   data-keyframe-drag-handle={keyframe.id}
+                  style={{ touchAction: "none" }}
                   onMouseDown={(event) => {
                     // Always stop propagation to prevent timeline/playhead from handling the event
                     event.stopPropagation();
                     event.preventDefault();
                     onKeyframeDragStart?.(keyframe.id, event);
+                  }}
+                  onTouchStart={(event) => {
+                    // Always stop propagation to prevent timeline/playhead from handling the event
+                    event.stopPropagation();
+                    event.preventDefault();
+                    // Convert touch event to mouse-like event for compatibility
+                    if (event.touches.length === 1 && onKeyframeDragStart) {
+                      const touch = event.touches[0];
+                      const syntheticEvent = {
+                        clientX: touch.clientX,
+                        clientY: touch.clientY,
+                        preventDefault: () => {},
+                        stopPropagation: () => {},
+                      } as React.MouseEvent;
+                      onKeyframeDragStart(keyframe.id, syntheticEvent);
+                    }
                   }}
                   className="absolute -right-2 top-1/2 -translate-y-1/2 cursor-grab active:cursor-grabbing opacity-60 hover:opacity-100 transition-opacity z-40"
                   title="Drag to move keyframe"

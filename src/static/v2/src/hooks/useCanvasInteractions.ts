@@ -637,6 +637,9 @@ export const useCanvasInteractions = ({
     };
   };
 
+  // Threshold for distinguishing tap from drag (in pixels)
+  const TOUCH_DRAG_THRESHOLD = 5;
+
   const handleCanvasMouseDown = useCallback(
     (event: ReactMouseEvent<HTMLCanvasElement>) => {
       skipNextClickRef.current = false;
@@ -995,6 +998,7 @@ export const useCanvasInteractions = ({
   const handleCanvasTouchStart = useCallback(
     (event: React.TouchEvent<HTMLCanvasElement>) => {
       if (!canvasRef.current) return;
+      event.preventDefault();
       const rect = canvasRef.current.getBoundingClientRect();
 
       if (event.touches.length === 2) {
@@ -1014,27 +1018,309 @@ export const useCanvasInteractions = ({
           lastTouch1: { x: touch1.clientX, y: touch1.clientY },
           lastTouch2: { x: touch2.clientX, y: touch2.clientY },
         });
-      } else if (event.touches.length === 1 && (tool === "select" || tool === "move" || tool === "pan")) {
-        // Single finger pan
+      } else if (event.touches.length === 1) {
         const touch = event.touches[0];
-        setTouchState({
-          initialDistance: 0,
-          initialZoom: canvasZoom,
-          initialPan: canvasPan,
-          centerPoint: { x: 0, y: 0 },
-          isPinching: false,
-          isPanning: true,
-          lastTouch1: { x: touch.clientX, y: touch.clientY },
-          lastTouch2: null,
-        });
+        const point = getCanvasPoint(touch.clientX, touch.clientY);
+        const screenPos = { x: touch.clientX, y: touch.clientY };
+
+        if (!point) return;
+
+        // Paint tool
+        if (tool === "paint") {
+          skipNextClickRef.current = false;
+          draggedDuringInteractionRef.current = false;
+          paintedLedsRef.current.clear();
+          if (!paintingTransactionRef.current) {
+            beginHistoryTransaction();
+            paintingTransactionRef.current = true;
+          }
+          beginPainting();
+          applyBrushAtPoint(point);
+          setTouchState({
+            initialDistance: 0,
+            initialZoom: canvasZoom,
+            initialPan: canvasPan,
+            centerPoint: { x: 0, y: 0 },
+            isPinching: false,
+            isPanning: false,
+            isPainting: true,
+            lastTouch1: screenPos,
+            lastTouch2: null,
+            initialTouchPoint: point,
+            touchStartScreenPos: screenPos,
+          });
+          return;
+        }
+
+        // Bucket tool
+        if (tool === "bucket") {
+          applyBucketAtPoint(point);
+          setTouchState({
+            initialDistance: 0,
+            initialZoom: canvasZoom,
+            initialPan: canvasPan,
+            centerPoint: { x: 0, y: 0 },
+            isPinching: false,
+            isPanning: false,
+            lastTouch1: screenPos,
+            lastTouch2: null,
+            initialTouchPoint: point,
+            touchStartScreenPos: screenPos,
+          });
+          return;
+        }
+
+        // Eyedropper tool
+        if (tool === "eyedropper") {
+          const hit = findLedHit(point);
+          if (hit) {
+            const appearance = getLedAppearance(hit.led.id);
+            setSelectedColor(appearance.color);
+            setSelectedOpacity(appearance.opacity);
+          }
+          setTouchState({
+            initialDistance: 0,
+            initialZoom: canvasZoom,
+            initialPan: canvasPan,
+            centerPoint: { x: 0, y: 0 },
+            isPinching: false,
+            isPanning: false,
+            lastTouch1: screenPos,
+            lastTouch2: null,
+            initialTouchPoint: point,
+            touchStartScreenPos: screenPos,
+          });
+          return;
+        }
+
+        // Color picker tool - no action on touch start
+        if (tool === "color-picker") {
+          setTouchState({
+            initialDistance: 0,
+            initialZoom: canvasZoom,
+            initialPan: canvasPan,
+            centerPoint: { x: 0, y: 0 },
+            isPinching: false,
+            isPanning: false,
+            lastTouch1: screenPos,
+            lastTouch2: null,
+            initialTouchPoint: point,
+            touchStartScreenPos: screenPos,
+          });
+          return;
+        }
+
+        // Select/move/pan tools - single finger pan or interaction
+        if (tool === "select" || tool === "move" || tool === "pan") {
+          skipNextClickRef.current = false;
+          draggedDuringInteractionRef.current = false;
+
+          // Select and move tools - device/LED interaction
+          if (mode === "edit" && (tool === "select" || tool === "move")) {
+            const shouldOpenProps = tool === "select";
+            
+            // Close properties panel when using move tool
+            if (tool === "move" && isOpen) {
+              closeDrawer();
+            }
+            
+            // Check for device hit
+            for (const device of devices) {
+              const dist = Math.hypot(point.x - device.position.x, point.y - device.position.y);
+              if (dist < 15) {
+                // Toggle properties panel if tapping same device with select tool
+                if (tool === "select" && isOpen && selectedDeviceId === device.id) {
+                  closeDrawer();
+                  setTouchState({
+                    initialDistance: 0,
+                    initialZoom: canvasZoom,
+                    initialPan: canvasPan,
+                    centerPoint: { x: 0, y: 0 },
+                    isPinching: false,
+                    isPanning: false,
+                    isSelecting: true,
+                    lastTouch1: screenPos,
+                    lastTouch2: null,
+                    initialTouchPoint: point,
+                    touchStartScreenPos: screenPos,
+                  });
+                  return;
+                }
+                
+                createHistoryCheckpoint();
+                setSelectedDeviceId(device.id);
+                setSelectedLEDId(null);
+                setSelectedBackgroundImage(false);
+                if (shouldOpenProps) {
+                  openDrawer({ type: "device", deviceId: device.id });
+                }
+                // Only allow dragging with move tool
+                if (tool === "move") {
+                  setIsDraggingElement(true);
+                  setDragStartOffset({
+                    x: point.x - device.position.x,
+                    y: point.y - device.position.y,
+                  });
+                  setTouchState({
+                    initialDistance: 0,
+                    initialZoom: canvasZoom,
+                    initialPan: canvasPan,
+                    centerPoint: { x: 0, y: 0 },
+                    isPinching: false,
+                    isPanning: false,
+                    isDragging: true,
+                    lastTouch1: screenPos,
+                    lastTouch2: null,
+                    initialTouchPoint: point,
+                    touchStartScreenPos: screenPos,
+                  });
+                  return;
+                } else {
+                  setTouchState({
+                    initialDistance: 0,
+                    initialZoom: canvasZoom,
+                    initialPan: canvasPan,
+                    centerPoint: { x: 0, y: 0 },
+                    isPinching: false,
+                    isPanning: false,
+                    isSelecting: true,
+                    lastTouch1: screenPos,
+                    lastTouch2: null,
+                    initialTouchPoint: point,
+                    touchStartScreenPos: screenPos,
+                  });
+                  return;
+                }
+              }
+            }
+            
+            // Check for LED hit
+            for (const device of devices) {
+              for (const strip of device.strips) {
+                for (const led of strip.leds) {
+                  const ledDist = Math.hypot(point.x - led.position.x, point.y - led.position.y);
+                  if (ledDist < 8) {
+                    // Toggle properties panel if tapping same LED with select tool
+                    if (tool === "select" && isOpen && selectedLEDId === led.id) {
+                      closeDrawer();
+                      setTouchState({
+                        initialDistance: 0,
+                        initialZoom: canvasZoom,
+                        initialPan: canvasPan,
+                        centerPoint: { x: 0, y: 0 },
+                        isPinching: false,
+                        isPanning: false,
+                        isSelecting: true,
+                        lastTouch1: screenPos,
+                        lastTouch2: null,
+                        initialTouchPoint: point,
+                        touchStartScreenPos: screenPos,
+                      });
+                      return;
+                    }
+                    
+                    createHistoryCheckpoint();
+                    setSelectedLEDId(led.id);
+                    setSelectedDeviceId(null);
+                    setSelectedBackgroundImage(false);
+                    if (shouldOpenProps) {
+                      openDrawer({ type: "led", ledId: led.id });
+                    }
+                    // Only allow dragging with move tool
+                    if (tool === "move") {
+                      setIsDraggingElement(true);
+                      setDragStartOffset({
+                        x: point.x - led.position.x,
+                        y: point.y - led.position.y,
+                      });
+                      setTouchState({
+                        initialDistance: 0,
+                        initialZoom: canvasZoom,
+                        initialPan: canvasPan,
+                        centerPoint: { x: 0, y: 0 },
+                        isPinching: false,
+                        isPanning: false,
+                        isDragging: true,
+                        lastTouch1: screenPos,
+                        lastTouch2: null,
+                        initialTouchPoint: point,
+                        touchStartScreenPos: screenPos,
+                      });
+                      return;
+                    } else {
+                      setTouchState({
+                        initialDistance: 0,
+                        initialZoom: canvasZoom,
+                        initialPan: canvasPan,
+                        centerPoint: { x: 0, y: 0 },
+                        isPinching: false,
+                        isPanning: false,
+                        isSelecting: true,
+                        lastTouch1: screenPos,
+                        lastTouch2: null,
+                        initialTouchPoint: point,
+                        touchStartScreenPos: screenPos,
+                      });
+                      return;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // Default to panning for select/move/pan tools if no hit
+          setTouchState({
+            initialDistance: 0,
+            initialZoom: canvasZoom,
+            initialPan: canvasPan,
+            centerPoint: { x: 0, y: 0 },
+            isPinching: false,
+            isPanning: true,
+            lastTouch1: screenPos,
+            lastTouch2: null,
+            initialTouchPoint: point,
+            touchStartScreenPos: screenPos,
+          });
+        }
       }
     },
-    [canvasZoom, canvasPan, tool, canvasRef, setTouchState]
+    [
+      canvasZoom,
+      canvasPan,
+      tool,
+      mode,
+      canvasRef,
+      setTouchState,
+      getCanvasPoint,
+      beginPainting,
+      applyBrushAtPoint,
+      applyBucketAtPoint,
+      findLedHit,
+      getLedAppearance,
+      setSelectedColor,
+      setSelectedOpacity,
+      beginHistoryTransaction,
+      skipNextClickRef,
+      draggedDuringInteractionRef,
+      devices,
+      isOpen,
+      selectedDeviceId,
+      selectedLEDId,
+      openDrawer,
+      closeDrawer,
+      createHistoryCheckpoint,
+      setSelectedDeviceId,
+      setSelectedLEDId,
+      setIsDraggingElement,
+      setDragStartOffset,
+    ]
   );
 
   const handleCanvasTouchMove = useCallback(
     (event: React.TouchEvent<HTMLCanvasElement>) => {
       if (!canvasRef.current || !touchState) return;
+      event.preventDefault();
       const rect = canvasRef.current.getBoundingClientRect();
 
       if (event.touches.length === 2 && touchState.isPinching) {
@@ -1074,29 +1360,189 @@ export const useCanvasInteractions = ({
           lastTouch1: { x: touch1.clientX, y: touch1.clientY },
           lastTouch2: { x: touch2.clientX, y: touch2.clientY },
         });
-      } else if (event.touches.length === 1 && touchState.isPanning && touchState.lastTouch1) {
-        // Single finger pan
+      } else if (event.touches.length === 1) {
         const touch = event.touches[0];
-        const dx = touch.clientX - touchState.lastTouch1.x;
-        const dy = touch.clientY - touchState.lastTouch1.y;
+        const point = getCanvasPoint(touch.clientX, touch.clientY);
+        const screenPos = { x: touch.clientX, y: touch.clientY };
 
-        setCanvasPan({
-          x: touchState.initialPan.x + dx,
-          y: touchState.initialPan.y + dy,
-        });
+        if (!point) return;
 
-        setTouchState({
-          ...touchState,
-          lastTouch1: { x: touch.clientX, y: touch.clientY },
-        });
+        // Paint tool - continue painting while finger moves
+        if (touchState.isPainting && tool === "paint") {
+          applyBrushAtPoint(point);
+          setTouchState({
+            ...touchState,
+            lastTouch1: screenPos,
+          });
+          return;
+        }
+
+        // Drag element (device/LED) with move tool
+        if (touchState.isDragging && isDraggingElement && mode === "edit" && tool === "move") {
+          draggedDuringInteractionRef.current = true;
+          const { x, y } = point;
+          const newX = x - dragStartOffset.x;
+          const newY = y - dragStartOffset.y;
+          setDevices(devices.map((device) => {
+            if (device.id === selectedDeviceId) {
+              return {
+                ...device,
+                position: { x: newX, y: newY },
+              };
+            }
+            return {
+              ...device,
+              strips: device.strips.map((strip) => ({
+                ...strip,
+                leds: strip.leds.map((led) =>
+                  led.id === selectedLEDId
+                    ? {
+                        ...led,
+                        position: { x: newX, y: newY },
+                      }
+                    : led
+                ),
+              })),
+            };
+          }));
+          setTouchState({
+            ...touchState,
+            lastTouch1: screenPos,
+          });
+          return;
+        }
+
+        // Single finger pan
+        if (touchState.isPanning && touchState.lastTouch1) {
+          const dx = touch.clientX - touchState.lastTouch1.x;
+          const dy = touch.clientY - touchState.lastTouch1.y;
+
+          setCanvasPan({
+            x: touchState.initialPan.x + dx,
+            y: touchState.initialPan.y + dy,
+          });
+
+          setTouchState({
+            ...touchState,
+            lastTouch1: screenPos,
+          });
+        }
       }
     },
-    [touchState, canvasRef, setCanvasZoom, setCanvasPan, setTouchState]
+    [
+      touchState,
+      canvasRef,
+      tool,
+      mode,
+      isDraggingElement,
+      selectedDeviceId,
+      selectedLEDId,
+      dragStartOffset,
+      devices,
+      setCanvasZoom,
+      setCanvasPan,
+      setTouchState,
+      getCanvasPoint,
+      applyBrushAtPoint,
+      setDevices,
+      draggedDuringInteractionRef,
+    ]
   );
 
-  const handleCanvasTouchEnd = useCallback(() => {
+  const handleCanvasTouchEnd = useCallback(async () => {
+    if (!touchState) {
+      setTouchState(null);
+      return;
+    }
+
+    // Clean up painting state
+    if (touchState.isPainting) {
+      endPainting();
+      paintedLedsRef.current.clear();
+      if (paintingTransactionRef.current) {
+        endHistoryTransaction();
+        paintingTransactionRef.current = false;
+      }
+    }
+
+    // Save device or LED position if we were dragging
+    if (touchState.isDragging && isDraggingElement) {
+      if (selectedDeviceId) {
+        const device = devices.find((d) => d.id === selectedDeviceId);
+        if (device) {
+          try {
+            const response = await fetch(`/api/v2/devices/${selectedDeviceId}`, {
+              method: "PATCH",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                position: device.position,
+              }),
+            });
+            if (!response.ok) {
+              const errorText = await response.text();
+              console.error("Failed to save device position:", response.status, errorText);
+              notificationManager.apiError(
+                `Error saving device position: ${response.status}`,
+                new Error(errorText)
+              );
+            }
+          } catch (error) {
+            console.error("Error saving device position:", error);
+            notificationManager.apiError("Error saving device position", error);
+          }
+        }
+      } else if (selectedLEDId) {
+        // Find the LED and its device/strip, then save all strips with updated LED positions
+        for (const device of devices) {
+          for (const strip of device.strips) {
+            const led = strip.leds.find((l) => l.id === selectedLEDId);
+            if (led) {
+              try {
+                // Save the entire device with updated LED positions
+                await fetch(`/api/v2/devices/${device.id}`, {
+                  method: "PATCH",
+                  headers: {
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    strips: device.strips.map((s: LEDStrip) => ({
+                      id: s.id,
+                      gpioPin: s.gpioPin,
+                      ledCount: s.ledCount,
+                      leds: s.leds.map((l: LED) => ({
+                        id: l.id,
+                        position: l.position,
+                        color: l.color,
+                        opacity: l.opacity,
+                      })),
+                    })),
+                  }),
+                });
+              } catch (error) {
+                notificationManager.apiError("Error saving LED position", error);
+              }
+              break;
+            }
+          }
+        }
+      }
+      setIsDraggingElement(false);
+    }
+
     setTouchState(null);
-  }, [setTouchState]);
+  }, [
+    setTouchState,
+    touchState,
+    endPainting,
+    endHistoryTransaction,
+    isDraggingElement,
+    selectedDeviceId,
+    selectedLEDId,
+    devices,
+    setIsDraggingElement,
+  ]);
 
   const handleCanvasClick = useCallback(
     (event: ReactMouseEvent<HTMLCanvasElement>) => {

@@ -1379,7 +1379,15 @@ def create_app() -> Flask:
     @app.get("/api/device/meta")
     def get_device_meta_info_legacy():
         """Expose local device metadata for controller handshakes."""
+        # Device ID is controller-managed: use deviceId from query parameter if provided
+        # This ensures deviceId comes from controller, not from device environment/hostname
+        requested_device_id = request.args.get("deviceId")
         identity = _device_identity_payload()
+        
+        # Override deviceId with controller-provided value if available
+        if requested_device_id and isinstance(requested_device_id, str) and requested_device_id.strip():
+            identity["deviceId"] = requested_device_id.strip()
+        
         strips = _active_strip_configs()
         from_simulator = _simulator_enabled()
         strip_payloads = [
@@ -1502,7 +1510,13 @@ def create_app() -> Flask:
         clock_skew_ms: int | None = None
         error_message: str | None = None
 
+        # Pass deviceId from request to meta endpoint so device echoes it back
+        requested_device_id = data.get("deviceId")
         meta_url = urljoin(f"{base_url}/", "api/device/meta")
+        if requested_device_id and isinstance(requested_device_id, str):
+            from urllib.parse import urlencode
+            meta_url = f"{meta_url}?{urlencode({'deviceId': requested_device_id})}"
+        
         health_url = urljoin(f"{base_url}/", "api/device/health")
 
         try:
@@ -1528,13 +1542,14 @@ def create_app() -> Flask:
             strips_payload = []
 
         if error_message is None:
-            device_id = (
-                device_payload.get("deviceId")
-                if isinstance(device_payload.get("deviceId"), str)
-                else data.get("deviceId")
-            )
+            # Device ID is controller-managed: prioritize deviceId from request
+            # The meta endpoint will echo back the deviceId we sent, so they should match
+            device_id = data.get("deviceId")
             if not isinstance(device_id, str) or not device_id.strip():
-                device_id = f"device-{uuid4().hex}"
+                # Fallback to metadata deviceId only if request didn't provide one
+                device_id = device_payload.get("deviceId")
+                if not isinstance(device_id, str) or not device_id.strip():
+                    device_id = f"device-{uuid4().hex}"
 
             persisted_id = _persist_device_graph(
                 db,
@@ -2544,9 +2559,23 @@ def create_app() -> Flask:
             )
             LOGGER.info("live_play command sent - results=%s", results)
         else:
-            # Non-live mode: dispatch playlists
+            # Non-live mode: dispatch playlists and start playback engine
             _maybe_dispatch_playlists()
-        _send_ws_command(command="playlist_play", payload={"sceneId": scene_id})
+            # Start synchronized playlist playback
+            playback_engine = app.config.get("PLAYLIST_PLAYBACK_ENGINE")
+            if playback_engine:
+                # Calculate synchronized start time (all devices start within 1ms)
+                synchronized_start_time_ms = int(time.time() * 1000) + 100
+                playback_engine.start_playback_all(synchronized_start_time_ms)
+                LOGGER.info(
+                    "Started playlist playback engine - start_time_ms=%s",
+                    synchronized_start_time_ms,
+                )
+            # Also send playlist_play command to follower devices with synchronized start time
+            _send_ws_command(
+                command="playlist_play",
+                payload={"sceneId": scene_id, "startTimeMs": synchronized_start_time_ms},
+            )
         
         return jsonify(playback_state[scene_id])
 
@@ -2602,7 +2631,12 @@ def create_app() -> Flask:
             )
             LOGGER.info("live_pause command sent - results=%s", results)
         else:
-            # Non-live mode: send playlist pause
+            # Non-live mode: stop playback engine and send playlist pause
+            playback_engine = app.config.get("PLAYLIST_PLAYBACK_ENGINE")
+            if playback_engine:
+                playback_engine.stop_playback_all()
+                LOGGER.info("Stopped playlist playback engine")
+            # Also send playlist_pause command to follower devices
             _send_ws_command(command="playlist_pause", payload={"sceneId": scene_id})
         
         return jsonify(playback_state[scene_id])
@@ -3217,6 +3251,12 @@ def create_app() -> Flask:
         )
         app.config["DEVICE_SERVICE"] = device_service
         device_service.start_health_poller()
+        
+        # Initialize playlist playback engine
+        from .server.playlists.playback_engine import PlaylistPlaybackEngine
+        playback_engine = PlaylistPlaybackEngine(app)
+        app.config["PLAYLIST_PLAYBACK_ENGINE"] = playback_engine
+        LOGGER.info("Playlist playback engine initialized")
 
     # Initialize follower WebSocket client if not controller
     if not is_controller:

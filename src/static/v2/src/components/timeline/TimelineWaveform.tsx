@@ -6,6 +6,7 @@ interface TimelineWaveformProps {
   onMouseDown: (event: React.MouseEvent<HTMLDivElement>) => void;
   onMouseUp: () => void;
   onMouseMove: (event: React.MouseEvent<HTMLDivElement>) => void;
+  onTouchStart?: (event: React.TouchEvent<HTMLDivElement>) => void;
 }
 
 export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({
@@ -14,14 +15,17 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({
   onMouseDown,
   onMouseUp,
   onMouseMove,
+  onTouchStart,
 }) => {
   return (
     <div
       className="h-32 bg-[#0f0f0f] rounded-b-lg relative overflow-hidden border border-white/10 border-t-0 cursor-pointer"
+      style={{ touchAction: "none" }}
       onClick={onClick}
       onMouseDown={onMouseDown}
       onMouseUp={onMouseUp}
       onMouseMove={onMouseMove}
+      onTouchStart={onTouchStart}
     >
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
         {hasAudio ? (

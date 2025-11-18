@@ -228,7 +228,15 @@ def create_device_blueprint(app) -> Blueprint:
     @bp.get("/api/device/meta")
     def get_device_meta_info():
         """Expose local device metadata for controller handshakes."""
+        # Device ID is controller-managed: use deviceId from query parameter if provided
+        # This ensures deviceId comes from controller, not from device environment/hostname
+        requested_device_id = request.args.get("deviceId")
         identity = _device_identity_payload(app)
+        
+        # Override deviceId with controller-provided value if available
+        if requested_device_id and isinstance(requested_device_id, str) and requested_device_id.strip():
+            identity["deviceId"] = requested_device_id.strip()
+        
         strips = _active_strip_configs(app)
         from_simulator = _simulator_enabled(app)
         strip_payloads = [
@@ -329,7 +337,13 @@ def create_device_blueprint(app) -> Blueprint:
         clock_skew_ms: int | None = None
         error_message: str | None = None
 
+        # Pass deviceId from request to meta endpoint so device echoes it back
+        requested_device_id = data.get("deviceId")
         meta_url = urljoin(f"{base_url}/", "api/device/meta")
+        if requested_device_id and isinstance(requested_device_id, str):
+            from urllib.parse import urlencode
+            meta_url = f"{meta_url}?{urlencode({'deviceId': requested_device_id})}"
+        
         health_url = urljoin(f"{base_url}/", "api/device/health")
 
         try:
@@ -356,13 +370,14 @@ def create_device_blueprint(app) -> Blueprint:
             strips_payload = []
 
         if error_message is None:
-            device_id = (
-                device_payload.get("deviceId")
-                if isinstance(device_payload.get("deviceId"), str)
-                else data.get("deviceId")
-            )
+            # Device ID is controller-managed: prioritize deviceId from request
+            # The meta endpoint will echo back the deviceId we sent, so they should match
+            device_id = data.get("deviceId")
             if not isinstance(device_id, str) or not device_id.strip():
-                device_id = f"device-{uuid4().hex}"
+                # Fallback to metadata deviceId only if request didn't provide one
+                device_id = device_payload.get("deviceId")
+                if not isinstance(device_id, str) or not device_id.strip():
+                    device_id = f"device-{uuid4().hex}"
 
             persisted_id = persistence_service.persist_device_graph(
                 device_id=device_id,

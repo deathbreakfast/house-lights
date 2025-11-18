@@ -9,6 +9,10 @@ interface TimelineZoomSliderProps {
     event: React.MouseEvent<HTMLDivElement>,
     type: "left" | "right" | "middle"
   ) => void;
+  onSliderTouchStart?: (
+    event: React.TouchEvent<HTMLDivElement>,
+    type: "left" | "right" | "middle"
+  ) => void;
 }
 
 export const TimelineZoomSlider: React.FC<TimelineZoomSliderProps> = ({
@@ -16,11 +20,13 @@ export const TimelineZoomSlider: React.FC<TimelineZoomSliderProps> = ({
   timelineWindowStart,
   timelineWindowWidth,
   onSliderMouseDown,
+  onSliderTouchStart,
 }) => {
   return (
     <div
       ref={sliderRef}
       className="h-8 bg-[#0f0f0f] rounded-lg relative border border-white/10 px-2 flex items-center gap-2 mt-2"
+      style={{ touchAction: "none" }}
     >
       <span className="text-xs text-gray-500 min-w-[40px]">Zoom:</span>
       <div className="flex-1 relative h-2 bg-white/10 rounded-lg">
@@ -31,14 +37,19 @@ export const TimelineZoomSlider: React.FC<TimelineZoomSliderProps> = ({
             width: `${timelineWindowWidth}%`,
           }}
           onMouseDown={(event) => onSliderMouseDown(event, "middle")}
+          onTouchStart={(event) => onSliderTouchStart?.(event, "middle")}
         >
           <div
             className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 bg-blue-500 rounded-full cursor-ew-resize hover:bg-blue-400 transition-colors z-10"
+            style={{ touchAction: "none" }}
             onMouseDown={(event) => onSliderMouseDown(event, "left")}
+            onTouchStart={(event) => onSliderTouchStart?.(event, "left")}
           />
           <div
             className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2 w-4 h-4 bg-blue-500 rounded-full cursor-ew-resize hover:bg-blue-400 transition-colors z-10"
+            style={{ touchAction: "none" }}
             onMouseDown={(event) => onSliderMouseDown(event, "right")}
+            onTouchStart={(event) => onSliderTouchStart?.(event, "right")}
           />
         </div>
       </div>

@@ -404,6 +404,105 @@ class DeviceService:
         )
         return download_url
 
+    def build_device_playlists_from_scene_playlist(
+        self, target_device_ids: list[str] | None = None
+    ) -> dict[str, str]:
+        """
+        Build device playlists from scene playlist entries.
+        Creates a snapshot copy of all keyframes for each scene at the time of building.
+        Returns dict mapping device_id to playlist_hash.
+        """
+        from ..playlists.service import PlaylistService
+        from ..keyframes.service import KeyframeService
+        
+        db = get_db(self.app)
+        playlist_service = PlaylistService(self.app)
+        keyframe_service = KeyframeService(self.app)
+        
+        # Get all scene playlist entries ordered by position
+        playlist_entries = playlist_service.get_playlist()
+        if not playlist_entries:
+            LOGGER.debug("No scene playlist entries found, skipping playlist build")
+            return {}
+        
+        # Get target device IDs
+        if target_device_ids is None:
+            device_rows = db.execute("SELECT id FROM devices").fetchall()
+            device_ids = [row["id"] for row in device_rows]
+        else:
+            device_ids = target_device_ids
+        
+        if not device_ids:
+            LOGGER.debug("No devices found, skipping playlist build")
+            return {}
+        
+        # Build playlist payload with complete scene data (snapshot)
+        playlist_payload_entries = []
+        for entry in playlist_entries:
+            scene_id = entry.get("sceneId")
+            if not isinstance(scene_id, str):
+                LOGGER.warning("Invalid sceneId in playlist entry: %s", entry)
+                continue
+            
+            # Load all keyframes for this scene (snapshot at build time)
+            keyframes = keyframe_service.list_keyframes(scene_id)
+            
+            playlist_entry = {
+                "id": entry.get("id"),
+                "sceneId": scene_id,
+                "position": entry.get("position"),
+                "playDurationSeconds": entry.get("playDurationSeconds"),
+                "fadeDurationSeconds": entry.get("fadeDurationSeconds"),
+                "keyframes": keyframes,  # Complete snapshot copy
+            }
+            playlist_payload_entries.append(playlist_entry)
+        
+        # Build complete playlist payload
+        playlist_payload = {
+            "entries": playlist_payload_entries,
+            "metadata": {},
+            "schedule": {},
+        }
+        
+        # Compute playlist hash
+        playlist_hash = playlist_service.compute_playlist_hash(playlist_payload)
+        
+        # Store playlist for each device
+        playlist_hashes: dict[str, str] = {}
+        playlist_id = f"playlist-{uuid4().hex}"
+        
+        for device_id in device_ids:
+            # Delete existing playlist for this device
+            db.execute("DELETE FROM device_playlists WHERE device_id = ?", (device_id,))
+            
+            # Insert new playlist
+            db.execute(
+                """
+                INSERT INTO device_playlists (id, device_id, playlist_hash, payload, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (playlist_id, device_id, playlist_hash, json.dumps(playlist_payload), None),
+            )
+            
+            # Update device_health with playlist_hash
+            db.execute(
+                "UPDATE device_health SET playlist_hash = ? WHERE device_id = ?",
+                (playlist_hash, device_id),
+            )
+            
+            playlist_hashes[device_id] = playlist_hash
+        
+        db.commit()
+        
+        LOGGER.info(
+            "Built device playlists - devices=%d, entries=%d, hash=%s",
+            len(device_ids),
+            len(playlist_payload_entries),
+            playlist_hash,
+        )
+        
+        return playlist_hashes
+
     def maybe_dispatch_playlists(self, target_device_ids: list[str] | None = None) -> None:
         """Send playlist-ready commands when in scheduled mode."""
         if self.app.config.get("LIVE_MODE_ENABLED"):
@@ -412,6 +511,12 @@ class DeviceService:
         light_state = self.app.config.get("LIGHT_STATE", {})
         if not light_state.get("is_on"):
             LOGGER.debug("Lights are off; skipping playlist dispatch.")
+            return
+
+        # Build playlists from scene playlist entries first
+        playlist_hashes = self.build_device_playlists_from_scene_playlist(target_device_ids)
+        if not playlist_hashes:
+            LOGGER.debug("No playlists built, skipping dispatch")
             return
 
         db = get_db(self.app)

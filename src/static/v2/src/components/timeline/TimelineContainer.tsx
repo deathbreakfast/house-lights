@@ -37,6 +37,12 @@ interface TimelineContainerProps {
     event: React.MouseEvent<HTMLDivElement>,
     type: "left" | "right" | "middle"
   ) => void;
+  onTimelineTouchStart?: (event: React.TouchEvent<HTMLDivElement>) => void;
+  onPlayheadTouchStart?: (event: React.TouchEvent<HTMLDivElement>) => void;
+  onSliderTouchStart?: (
+    event: React.TouchEvent<HTMLDivElement>,
+    type: "left" | "right" | "middle"
+  ) => void;
   onKeyframeSelect?: (keyframe: Keyframe) => void;
   onKeyframeDragStart?: (keyframeId: string, event: React.MouseEvent) => void;
   onKeyframeDrag?: (event: React.MouseEvent) => void;
@@ -68,6 +74,9 @@ export const TimelineContainer: React.FC<TimelineContainerProps> = ({
   onTimelineDrag,
   onPlayheadMouseDown,
   onSliderMouseDown,
+  onTimelineTouchStart,
+  onPlayheadTouchStart,
+  onSliderTouchStart,
   onKeyframeSelect,
   onKeyframeDragStart,
   onKeyframeDrag,
@@ -171,16 +180,18 @@ export const TimelineContainer: React.FC<TimelineContainerProps> = ({
             onMouseDown={onTimelineMouseDown}
             onMouseUp={onTimelineMouseUp}
             onMouseMove={onTimelineDrag}
+            onTouchStart={onTimelineTouchStart}
           />
 
           <div
             ref={timelineRef}
             className="h-12 relative bg-[#0f0f0f] rounded-t-lg overflow-hidden border border-white/10 border-b-0"
-            style={{ cursor: isDraggingKeyframe ? "grabbing" : "crosshair" }}
+            style={{ cursor: isDraggingKeyframe ? "grabbing" : "crosshair", touchAction: "none" }}
             onClick={onTimelineClick}
             onMouseDown={onTimelineMouseDown}
             onMouseUp={onTimelineMouseUp}
             onMouseMove={onTimelineDrag}
+            onTouchStart={onTimelineTouchStart}
           >
             <TimelineKeyframes
               keyframes={keyframes}
@@ -203,11 +214,13 @@ export const TimelineContainer: React.FC<TimelineContainerProps> = ({
             onMouseDown={onTimelineMouseDown}
             onMouseUp={onTimelineMouseUp}
             onMouseMove={onTimelineDrag}
+            onTouchStart={onTimelineTouchStart}
           />
 
           <TimelinePlayhead
             positionPercent={playheadPercent}
             onMouseDown={onPlayheadMouseDown}
+            onTouchStart={onPlayheadTouchStart}
           />
         </div>
 
@@ -216,6 +229,7 @@ export const TimelineContainer: React.FC<TimelineContainerProps> = ({
           timelineWindowStart={timelineWindowStart}
           timelineWindowWidth={timelineWindowWidth}
           onSliderMouseDown={onSliderMouseDown}
+          onSliderTouchStart={onSliderTouchStart}
         />
       </div>
     </div>

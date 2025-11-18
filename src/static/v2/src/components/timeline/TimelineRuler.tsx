@@ -16,6 +16,7 @@ interface TimelineRulerProps {
   onMouseDown: (event: React.MouseEvent<HTMLDivElement>) => void;
   onMouseUp: () => void;
   onMouseMove: (event: React.MouseEvent<HTMLDivElement>) => void;
+  onTouchStart?: (event: React.TouchEvent<HTMLDivElement>) => void;
 }
 
 const formatTimeLabel = (timeMs: number) => {
@@ -51,6 +52,7 @@ export const TimelineRuler: React.FC<TimelineRulerProps> = ({
   onMouseDown,
   onMouseUp,
   onMouseMove,
+  onTouchStart,
 }) => {
   const { timeMarkers, frameMarkers } = useMemo(() => {
     const visibleStart = (timelineWindowStart / 100) * totalDuration;
@@ -90,10 +92,12 @@ export const TimelineRuler: React.FC<TimelineRulerProps> = ({
   return (
     <div
       className="relative h-6 mb-1 cursor-pointer"
+      style={{ touchAction: "none" }}
       onClick={onClick}
       onMouseDown={onMouseDown}
       onMouseUp={onMouseUp}
       onMouseMove={onMouseMove}
+      onTouchStart={onTouchStart}
     >
       {frameMarkers.map((marker, index) => (
         <div

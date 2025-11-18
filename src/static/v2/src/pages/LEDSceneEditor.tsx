@@ -622,6 +622,9 @@ export const LEDSceneEditor: React.FC = () => {
     handlePlayheadMouseDown,
     handleSliderMouseDown,
     handleTimelinePointer,
+    handleTimelineTouchStart,
+    handlePlayheadTouchStart,
+    handleSliderTouchStart,
   } = useTimelineInteractions({
     timelineRef,
     sliderRef,
@@ -1013,6 +1016,9 @@ export const LEDSceneEditor: React.FC = () => {
         }}
         onPlayheadMouseDown={handlePlayheadMouseDown}
         onSliderMouseDown={handleSliderMouseDown}
+        onTimelineTouchStart={handleTimelineTouchStart}
+        onPlayheadTouchStart={handlePlayheadTouchStart}
+        onSliderTouchStart={handleSliderTouchStart}
         onKeyframeSelect={handleKeyframeSelect}
         onKeyframeDragStart={handleKeyframeDragStart}
         onKeyframeDrag={handleKeyframeDrag}

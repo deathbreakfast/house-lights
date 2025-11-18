@@ -12,6 +12,12 @@ export type TouchState = {
   isPanning: boolean;
   lastTouch1: Point | null;
   lastTouch2: Point | null;
+  // Touch interaction tracking
+  isPainting?: boolean;
+  isSelecting?: boolean;
+  isDragging?: boolean;
+  initialTouchPoint?: Point;
+  touchStartScreenPos?: Point;
 };
 
 export const useCanvasViewport = () => {

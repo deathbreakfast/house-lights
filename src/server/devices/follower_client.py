@@ -35,6 +35,8 @@ class FollowerWebSocketClient:
         self._stop_event = threading.Event()
         self._connected = False
         self._reconnect_delay = 5.0  # seconds
+        self._local_playlist: dict[str, object] | None = None
+        self._playback_engine = None
 
     def _get_device_id(self) -> str:
         """Get the device ID from environment or fallback."""
@@ -138,17 +140,67 @@ class FollowerWebSocketClient:
     def _handle_playlist_ready(self, payload: dict[str, object]) -> None:
         """Handle playlist_ready command - playlist is ready for download."""
         LOGGER.info("Received playlist_ready command - payload=%s", payload)
-        # TODO: Implement playlist download and execution if needed
+        download_url = payload.get("downloadUrl")
+        if not isinstance(download_url, str):
+            LOGGER.warning("playlist_ready missing downloadUrl")
+            return
+        
+        # Download playlist from controller
+        try:
+            import requests
+            response = requests.get(download_url, timeout=10.0)
+            if response.status_code == 200:
+                self._local_playlist = response.json()
+                LOGGER.info(
+                    "Downloaded playlist - entries=%d",
+                    len(self._local_playlist.get("entries", [])) if isinstance(self._local_playlist, dict) else 0,
+                )
+            else:
+                LOGGER.warning("Failed to download playlist - status=%d", response.status_code)
+        except Exception as exc:
+            LOGGER.error("Error downloading playlist: %s", exc, exc_info=True)
 
     def _handle_playlist_play(self, payload: dict[str, object]) -> None:
         """Handle playlist_play command - start playlist playback."""
         LOGGER.info("Received playlist_play command - payload=%s", payload)
-        # TODO: Implement playlist play if needed
+        
+        if not self._local_playlist:
+            LOGGER.warning("No playlist available, cannot start playback")
+            return
+        
+        # Initialize local playback engine if needed
+        if self._playback_engine is None:
+            from ..playlists.playback_engine import PlaylistPlaybackEngine
+            self._playback_engine = PlaylistPlaybackEngine(self.app)
+        
+        # Get synchronized start time from payload if provided, otherwise use current time
+        synchronized_start_time_ms = payload.get("startTimeMs")
+        if not isinstance(synchronized_start_time_ms, int):
+            synchronized_start_time_ms = int(time.time() * 1000) + 100
+        
+        # Store playlist in a way the engine can access it
+        # For follower devices, we need to store it in a format the engine expects
+        # The engine reads from device_playlists table, but followers don't have that
+        # So we'll need to modify the engine or store it differently
+        # For now, let's store it in app config temporarily
+        device_id = self._get_device_id()
+        self.app.config.setdefault("FOLLOWER_PLAYLISTS", {})[device_id] = self._local_playlist
+        
+        # Start playback
+        self._playback_engine.start_playback(device_id, synchronized_start_time_ms)
+        LOGGER.info("Started local playlist playback - device_id=%s, start_time_ms=%s", device_id, synchronized_start_time_ms)
 
     def _handle_playlist_pause(self, payload: dict[str, object]) -> None:
         """Handle playlist_pause command - pause playlist playback."""
         LOGGER.info("Received playlist_pause command - payload=%s", payload)
-        # TODO: Implement playlist pause if needed
+        
+        if self._playback_engine is None:
+            LOGGER.debug("No playback engine initialized, nothing to pause")
+            return
+        
+        device_id = self._get_device_id()
+        self._playback_engine.stop_playback(device_id)
+        LOGGER.info("Paused local playlist playback - device_id=%s", device_id)
 
     def _handle_power(self, payload: dict[str, object]) -> None:
         """Handle power command - turn lights on/off."""
