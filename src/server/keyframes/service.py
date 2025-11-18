@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -11,12 +12,70 @@ if TYPE_CHECKING:
 from .repository import KeyframeRepository
 from ..json_utils import safe_scene_data
 
+LOGGER = logging.getLogger(__name__)
+
+
 class KeyframeService:
     """Service for keyframe business logic."""
 
     def __init__(self, app: Flask) -> None:
         self.app = app
         self.repository = KeyframeRepository(app)
+
+    def _get_device_id_for_led(self, led_id: str) -> str | None:
+        """Get device_id for an LED ID, trying parse first, then database lookup."""
+        # Try to parse device_id from LED ID structure
+        # LED IDs are typically: "{device_id}-{strip_id}-led-{index}" or "{device_id}-pin-{pin}-led-{index}"
+        # Strip IDs are typically: "{device_id}-pin-{pin}"
+        # So device_id is usually the prefix before the first "-pin-" or before "-led-"
+        parts = led_id.split("-")
+        
+        # Try to find where device_id ends
+        # If we see "pin" or "led", everything before that could be the device_id
+        for i, part in enumerate(parts):
+            if part == "pin" and i > 0:
+                # Device ID is everything before "-pin-"
+                device_id = "-".join(parts[:i])
+                return device_id
+            elif part == "led" and i > 0:
+                # Could be "{device_id}-pin-{pin}-led-{index}" or "{device_id}-{strip_id}-led-{index}"
+                # Look back to see if we have "pin" before "led"
+                if i >= 2 and parts[i - 2] == "pin":
+                    # Format: {device_id}-pin-{pin}-led-{index}
+                    device_id = "-".join(parts[:i - 2])
+                else:
+                    # Format: {device_id}-{strip_id}-led-{index}
+                    # Strip ID itself might contain device_id, but harder to parse
+                    # For now, try first part
+                    device_id = parts[0] if parts else None
+                
+                if device_id:
+                    return device_id
+        
+        # Fallback: try database lookup
+        try:
+            from ...database import get_db
+            db = get_db(self.app)
+            row = db.execute(
+                """
+                SELECT led_strips.device_id
+                FROM leds
+                JOIN led_strips ON leds.strip_id = led_strips.id
+                WHERE leds.id = ?
+                LIMIT 1
+                """,
+                (led_id,),
+            ).fetchone()
+            if row:
+                return row["device_id"]
+        except Exception as exc:
+            LOGGER.debug("Database lookup failed for LED %s: %s", led_id, exc)
+        
+        # Last resort: assume first part is device_id
+        if parts:
+            return parts[0]
+        
+        return None
 
     def _serialize_keyframe_row(self, row) -> dict[str, object]:
         """Serialize a keyframe row to API format."""
@@ -148,21 +207,68 @@ class KeyframeService:
         if led_states:
             device_service = self.app.config.get("DEVICE_SERVICE")
             if device_service:
+                # Group LED states by device_id to send only relevant LEDs to each device
+                led_states_by_device: dict[str, dict[str, object]] = {}
+                
+                for led_id, led_state in led_states.items():
+                    device_id = self._get_device_id_for_led(led_id)
+                    if device_id:
+                        if device_id not in led_states_by_device:
+                            led_states_by_device[device_id] = {}
+                        led_states_by_device[device_id][led_id] = led_state
+                    else:
+                        logger.warning("Could not determine device_id for LED %s, skipping", led_id)
+                
                 logger.debug(
-                    "Sending live_frame WebSocket command - scene_id=%s, timestamp=%s, led_count=%s",
+                    "Grouped LED states by device - scene_id=%s, timestamp=%s, total_leds=%s, devices=%s",
                     scene_id,
                     timestamp_ms,
                     led_count,
+                    list(led_states_by_device.keys()),
                 )
-                results = device_service.send_ws_command(
-                    command="live_frame",
-                    payload={
-                        "sceneId": scene_id,
-                        "timestamp": timestamp_ms,
-                        "ledStates": led_states,
-                    },
-                )
-                logger.info("live_frame command sent - results=%s", results)
+                
+                # Send filtered LED states to each device via WebSocket
+                all_results: dict[str, bool] = {}
+                ws_clients = self.app.config.get("WS_CLIENTS", {})
+                
+                for target_device_id, device_led_states in led_states_by_device.items():
+                    if target_device_id in ws_clients:
+                        # Send to specific device via WebSocket
+                        logger.debug(
+                            "Sending live_frame to device %s with %d LEDs",
+                            target_device_id,
+                            len(device_led_states),
+                        )
+                        device_results = device_service.send_ws_command(
+                            command="live_frame",
+                            payload={
+                                "sceneId": scene_id,
+                                "timestamp": timestamp_ms,
+                                "ledStates": device_led_states,  # Only this device's LEDs
+                            },
+                            device_ids=[target_device_id],
+                        )
+                        all_results.update(device_results)
+                
+                logger.info("live_frame commands sent - results=%s", all_results)
+                
+                # Always apply to local hardware if this is the controller (regardless of WebSocket clients)
+                if self.app.config.get("IS_CONTROLLER", False):
+                    local_device_id = device_service.local_device_id_for_scene(scene_id)
+                    local_led_states = led_states_by_device.get(local_device_id, {})
+                    if local_led_states:
+                        from ...hardware import apply_live_frame_to_hardware
+                        logger.debug(
+                            "Applying %d LEDs to local hardware (device_id=%s)",
+                            len(local_led_states),
+                            local_device_id,
+                        )
+                        apply_live_frame_to_hardware(self.app, local_led_states)
+                    else:
+                        logger.debug(
+                            "No LED states for local device %s in this frame",
+                            local_device_id,
+                        )
             else:
                 logger.warning("DEVICE_SERVICE not available, cannot send live_frame command")
         else:

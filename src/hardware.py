@@ -7,7 +7,7 @@ import threading
 import time
 import os
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 LOGGER = logging.getLogger(__name__)
 
@@ -16,6 +16,9 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     Color = None  # type: ignore
     PixelStrip = None  # type: ignore
+
+if TYPE_CHECKING:
+    from flask import Flask
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,13 @@ class NoopLightController:
             pixel_index,
             color,
             strip,
+        )
+
+    def apply_led_states(self, led_states: dict[str, dict[str, object]]) -> None:
+        """Apply LED states directly to hardware (no-op for NoopLightController)."""
+        LOGGER.info(
+            "NoopLightController.apply_led_states called with %d LED states",
+            len(led_states),
         )
 
 
@@ -246,6 +256,64 @@ class Ws2811LightController:
                 strip.setPixelColor(idx, self._encode_color(255, 255, 255))
             strip.show()
 
+    def apply_led_states(self, led_states: dict[str, dict[str, object]]) -> None:
+        """Apply LED states directly to hardware from a dict mapping LED IDs to {color, opacity}."""
+        if not self._strip_by_pin:
+            LOGGER.warning("No hardware strips available")
+            return
+        
+        # LED IDs are typically: "{device_id}-{strip_id}-led-{index}" or "{device_id}-pin-{pin}-led-{index}"
+        # We need to parse them to extract pin and index
+        for led_id, led_state in led_states.items():
+            try:
+                # Parse LED ID to extract pin and index
+                # Format: "{device_id}-pin-{pin}-led-{index}" or similar
+                parts = led_id.split("-")
+                pin: int | None = None
+                index: int | None = None
+                
+                # Look for pin and led index in the ID
+                for i, part in enumerate(parts):
+                    if part == "pin" and i + 1 < len(parts):
+                        try:
+                            pin = int(parts[i + 1])
+                        except (ValueError, IndexError):
+                            pass
+                    elif part == "led" and i + 1 < len(parts):
+                        try:
+                            index = int(parts[i + 1])
+                        except (ValueError, IndexError):
+                            pass
+                
+                if pin is None or index is None:
+                    # Try alternative parsing or skip
+                    continue
+                
+                # Get color and opacity
+                color_str = str(led_state.get("color", "#000000"))
+                opacity = float(led_state.get("opacity", 1.0))
+                
+                # Convert hex color to RGB
+                rgb = self._hex_to_rgb(color_str)
+                r, g, b = rgb
+                
+                # Apply opacity
+                r = int(r * opacity)
+                g = int(g * opacity)
+                b = int(b * opacity)
+                
+                # Apply to hardware
+                strip = self._strip_by_pin.get(pin)
+                if strip and 0 <= index < strip.numPixels():
+                    strip.setPixelColor(index, self._encode_color(r, g, b))
+            
+            except Exception as exc:
+                LOGGER.warning("Error applying LED state for %s: %s", led_id, exc)
+        
+        # Show all changes at once
+        for strip in self._strips:
+            strip.show()
+
 
 class PatternPlaybackWorker:
     def __init__(
@@ -338,98 +406,110 @@ class PatternPlaybackWorker:
         frames: list[dict[int, list[int]]] = []
         durations: list[float] = []
 
-        def build_blank_frame() -> dict[int, list[int]]:
-            return {
-                pin: [default_state for _ in range(strip_lengths[pin])]
-                for pin in available_strips
-            }
+        previous_frame: dict[int, list[int]] = {
+            pin: [default_state] * length for pin, length in strip_lengths.items()
+        }
 
-        if not sorted_keyframes:
-            frames.append(build_blank_frame())
-            durations.append(duration or minimum_step)
-            return frames, durations
+        for frame_idx, keyframe in enumerate(sorted_keyframes):
+            frame_time = self._safe_float(keyframe.get("time", 0.0), 0.0)
+            frame_duration = self._safe_float(keyframe.get("duration"), minimum_step)
 
-        last_time = sorted_keyframes[0].get("time", 0.0)
-        last_time = self._safe_float(last_time, 0.0)
-        first_time = last_time
+            frame_data = keyframe.get("frames") or {}
+            if not isinstance(frame_data, dict):
+                frame_data = {}
 
-        for index, frame in enumerate(sorted_keyframes):
-            frame_time = self._safe_float(frame.get("time", last_time), last_time)
-            frame_time = max(frame_time, last_time)
-            frame_states = build_blank_frame()
-            overrides = frame.get("overrides")
-            if isinstance(overrides, dict):
-                for key, override in overrides.items():
-                    if not isinstance(key, str):
-                        continue
-                    try:
-                        pin_str, index_str = key.split(":")
-                        pin = int(pin_str)
-                        pixel_index = int(index_str)
-                    except (ValueError, TypeError):
-                        LOGGER.debug("Invalid override key '%s'; expected 'pin:index'.", key)
-                        continue
-                    if pin not in frame_states:
-                        continue
-                    strip_len = strip_lengths[pin]
-                    if not (0 <= pixel_index < strip_len):
-                        continue
-                    is_on = True
-                    color_hex = "#ffffff"
-                    brightness_value = 100
-                    if isinstance(override, dict):
-                        if override.get("on") is False:
-                            is_on = False
-                        color_hex = override.get("color", "#ffffff")
-                        brightness_value = override.get("brightness", 100)
-                    if not is_on:
-                        frame_states[pin][pixel_index] = default_state
-                        continue
-                    base_r, base_g, base_b = self._controller._hex_to_rgb(str(color_hex))
-                    brightness_pct = self._safe_float(brightness_value, 100.0)
-                    brightness_pct = max(0.0, min(100.0, brightness_pct))
-                    factor = brightness_pct / 100.0
-                    red = self._controller._clamp_byte(base_r * factor)
-                    green = self._controller._clamp_byte(base_g * factor)
-                    blue = self._controller._clamp_byte(base_b * factor)
-                    frame_states[pin][pixel_index] = self._controller._encode_color(red, green, blue)
+            current_frame: dict[int, list[int]] = {}
+            for pin, length in strip_lengths.items():
+                strip_frame = frame_data.get(str(pin)) or frame_data.get(pin)
+                if not isinstance(strip_frame, list):
+                    strip_frame = previous_frame.get(pin, [default_state] * length)
 
-            frames.append(frame_states)
+                strip_frame_list: list[int] = []
+                for idx in range(length):
+                    if idx < len(strip_frame):
+                        pixel_value = strip_frame[idx]
+                        if isinstance(pixel_value, dict):
+                            color = pixel_value.get("color", "#ffffff")
+                            opacity = self._safe_float(pixel_value.get("opacity"), 1.0)
+                            rgb = self._controller._hex_to_rgb(str(color))
+                            r, g, b = rgb
+                            r = int(r * opacity)
+                            g = int(g * opacity)
+                            b = int(b * opacity)
+                            strip_frame_list.append(self._controller._encode_color(r, g, b))
+                        elif isinstance(pixel_value, (int, float)):
+                            strip_frame_list.append(int(pixel_value))
+                        else:
+                            strip_frame_list.append(default_state)
+                    else:
+                        strip_frame_list.append(default_state)
 
-            if index + 1 < len(sorted_keyframes):
-                next_time = self._safe_float(sorted_keyframes[index + 1].get("time", frame_time), frame_time)
-            else:
-                next_time = max(frame_time + minimum_step, duration if duration > 0 else frame_time + minimum_step)
-            frame_duration = max(minimum_step, next_time - frame_time)
+                current_frame[pin] = strip_frame_list
+
+            frames.append(current_frame)
             durations.append(frame_duration)
-            last_time = frame_time
+            previous_frame = current_frame
 
-        loop_length = max(last_time - first_time, minimum_step)
-        if loop_length < durations[-1]:
-            durations[-1] = loop_length
+        if not frames:
+            single_frame: dict[int, list[int]] = {
+                pin: [default_state] * length for pin, length in strip_lengths.items()
+            }
+            frames.append(single_frame)
+            durations.append(duration)
 
-        return frames, durations
-
-
-def should_enable_hardware() -> bool:
-    """Returns True if the hardware controller should be activated."""
-    raw_value = os.getenv("HOUSE_LIGHTS_ENABLE_HARDWARE", "").strip().lower()
-    return raw_value in {"1", "true", "yes", "on"}
+        return (frames, durations)
 
 
 def build_controller(strip_configs: list[LightStripConfig]) -> LightController:
-    """Construct an appropriate light controller based on environment."""
-    if not should_enable_hardware():
-        LOGGER.info("Hardware control disabled; using NoopLightController.")
-        return NoopLightController(strip_configs)
+    """Build a hardware controller for the given strip configurations."""
+    if not strip_configs:
+        LOGGER.warning("No strip configurations provided; using NoopLightController.")
+        return NoopLightController([])
 
     try:
-        controller = Ws2811LightController(strip_configs)
-        LOGGER.info("WS2811 hardware controller initialized.")
-        return controller
-    except Exception as exc:  # pragma: no cover - defensive logging
-        LOGGER.exception("Failed to initialize WS2811 hardware controller: %s", exc)
-        LOGGER.warning("Falling back to NoopLightController.")
+        return Ws2811LightController(strip_configs)
+    except RuntimeError as exc:
+        LOGGER.warning("Failed to initialize WS2811 controller: %s; using NoopLightController.", exc)
+        return NoopLightController(strip_configs)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.exception("Unexpected error initializing hardware controller; using NoopLightController.")
         return NoopLightController(strip_configs)
 
 
+def apply_live_frame_to_hardware(app: Flask, led_states: dict[str, object]) -> None:
+    """Apply live frame LED states directly to local hardware. 
+    
+    This is called with pre-filtered LED states that belong to the local device.
+    """
+    controller = app.config.get("LIGHT_CONTROLLER")
+    if not controller:
+        LOGGER.warning("LIGHT_CONTROLLER not available, cannot apply live frame to hardware")
+        return
+    
+    try:
+        # Ensure led_states is in correct format: dict[str, dict[str, object]]
+        if not isinstance(led_states, dict):
+            LOGGER.warning("led_states must be a dictionary")
+            return
+        
+        # Convert to proper format if needed (values should be dicts with color/opacity)
+        formatted_states: dict[str, dict[str, object]] = {}
+        for led_id, state in led_states.items():
+            if isinstance(state, dict):
+                formatted_states[str(led_id)] = state
+            else:
+                LOGGER.warning("LED state for %s is not a dictionary, skipping", led_id)
+        
+        if not formatted_states:
+            LOGGER.warning("No valid LED states to apply")
+            return
+        
+        # If controller has a method to apply LED states directly, use it
+        if hasattr(controller, "apply_led_states"):
+            controller.apply_led_states(formatted_states)  # type: ignore
+            LOGGER.debug("Applied %d LED states to local hardware (no WebSocket clients connected)", len(formatted_states))
+        else:
+            LOGGER.warning("Controller does not support apply_led_states method")
+    
+    except Exception as exc:
+        LOGGER.error("Error applying LED states to local hardware: %s", exc, exc_info=True)

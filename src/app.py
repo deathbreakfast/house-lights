@@ -929,7 +929,14 @@ def create_app() -> Flask:
     def studio_v2() -> str:
         """Render the experimental v2 studio workspace."""
         if not app.config.get("IS_CONTROLLER", True):
-            abort(404)
+            identity = _device_identity_payload()
+            return jsonify(
+                {
+                    "status": "follower",
+                    "message": "Controller UI disabled on this device.",
+                    "device": identity,
+                }
+            ), 404
         return render_template("v2.html")
     
     def _upload_background_image(scene_id: str):
@@ -3279,6 +3286,14 @@ def create_app() -> Flask:
         )
         app.config["DEVICE_SERVICE"] = device_service
         device_service.start_health_poller()
+
+    # Initialize follower WebSocket client if not controller
+    if not is_controller:
+        from .server.devices.follower_client import FollowerWebSocketClient
+        follower_client = FollowerWebSocketClient(app)
+        app.config["FOLLOWER_WS_CLIENT"] = follower_client
+        follower_client.start()
+        LOGGER.info("Follower WebSocket client initialized")
 
     return app
 
