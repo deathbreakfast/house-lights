@@ -69,11 +69,11 @@ export const usePlaybackHandlers = ({
         });
       }
     } else {
-      void fetch(`/api/v2/playback/${currentSceneId}/${endpoint}`, {
-        method: "POST",
-      }).catch((error) =>
-        console.error("Error updating playback state:", error)
-      );
+    void fetch(`/api/v2/playback/${currentSceneId}/${endpoint}`, {
+      method: "POST",
+    }).catch((error) =>
+      console.error("Error updating playback state:", error)
+    );
     }
   }, [
     currentSceneId,

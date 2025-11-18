@@ -2608,7 +2608,7 @@ def create_app() -> Flask:
         else:
             # Non-live mode: dispatch playlists
             _maybe_dispatch_playlists()
-            _send_ws_command(command="playlist_play", payload={"sceneId": scene_id})
+        _send_ws_command(command="playlist_play", payload={"sceneId": scene_id})
         
         return jsonify(playback_state[scene_id])
 
