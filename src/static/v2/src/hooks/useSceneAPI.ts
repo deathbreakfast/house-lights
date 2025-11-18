@@ -36,19 +36,7 @@ export const useSceneAPI = ({
         const data = await response.json();
         payload = Array.isArray(data) ? data : [];
       }
-      if (!payload.length) {
-        const createResponse = await fetch("/api/v2/scenes", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ name: "Scene 1" }),
-        });
-        if (createResponse.ok) {
-          const created = await createResponse.json();
-          payload = [created];
-        }
-      }
+      // Server now ensures a default scene exists, so we don't need to create one here
       const normalizedScenes: Scene[] =
         payload.map((sceneMeta) => ({
           id: sceneMeta.id,

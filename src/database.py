@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from flask import Flask, g
 import logging
@@ -345,7 +346,53 @@ def _init_db(db: sqlite3.Connection) -> None:
         # Migration already applied or table doesn't exist yet
         pass
     
+    # Ensure at least one default scene exists
+    _ensure_default_scene(db)
+    
     db.commit()
+
+
+def _ensure_default_scene(db: sqlite3.Connection) -> None:
+    """Ensure at least one default scene exists in the database."""
+    # Check if any scenes exist (excluding studio background scene)
+    # Try to import the constant, but fall back to hardcoded value for script contexts
+    try:
+        from .server.config import STUDIO_BACKGROUND_SCENE_ID
+    except ImportError:
+        # Fallback for when running outside package context (e.g., from scripts)
+        STUDIO_BACKGROUND_SCENE_ID = "__studio_background__"
+    
+    row = db.execute(
+        """
+        SELECT COUNT(*) as count
+        FROM scenes
+        WHERE id != ?
+        """,
+        (STUDIO_BACKGROUND_SCENE_ID,),
+    ).fetchone()
+    
+    # Handle both Row objects (from Flask context) and tuples (from scripts)
+    if row is None:
+        scene_count = 0
+    else:
+        # Try to access as Row object first, fall back to tuple index
+        try:
+            scene_count = row["count"]
+        except (TypeError, KeyError):
+            # If it's a tuple, access by index
+            scene_count = row[0] if row else 0
+    
+    # If no scenes exist, create a default one
+    if scene_count == 0:
+        scene_id = f"scene-{uuid4().hex}"
+        db.execute(
+            """
+            INSERT INTO scenes (id, name, power_on, data)
+            VALUES (?, ?, 0, ?)
+            """,
+            (scene_id, "Scene 1", "{}"),
+        )
+        logger.info("Created default scene: %s", scene_id)
 
 
 def init_app(app: Flask) -> None:
