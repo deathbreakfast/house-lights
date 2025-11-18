@@ -70,7 +70,7 @@ class DeviceManagementService:
 
         return {
             "deviceId": device_id,
-            "sceneId": device_row["scene_id"],
+            "sceneId": None,  # Devices are global, not tied to scenes
             "ipAddress": device_row["ip_address"],
             "deviceType": device_row["device_type"],
             "stripMode": device_row["strip_mode"],

@@ -101,6 +101,7 @@ class DeviceService:
         self.update_device_health_metadata(device_id, metadata_patch)
 
         # Reconcile strips if metadata available
+        # Only update strips for existing devices - do NOT create new devices during health polling
         if meta_payload and isinstance(meta_payload, dict):
             db = get_db(self.app)
             device_row = db.execute(
@@ -111,12 +112,15 @@ class DeviceService:
                 """,
                 (device_id,),
             ).fetchone()
+            # Only reconcile strips if device exists in database
+            # Do not call persist_device_graph which would create devices if metadata deviceId differs
             if device_row:
                 position_payload = {
                     "x": device_row["position_x"],
                     "y": device_row["position_y"],
                 }
                 try:
+                    # Only update strips if device exists - don't create devices during health polling
                     self._persistence_service.persist_device_graph(
                         device_id=device_id,
                         ip_address=device_row["ip_address"] or ip_address,
@@ -207,12 +211,6 @@ class DeviceService:
             "capabilities": capabilities,
             "isController": self.app.config.get("IS_CONTROLLER"),
         }
-
-    def local_device_id_for_scene(self, scene_id: str) -> str:
-        """Generate local device ID for a scene."""
-        prefix = self.app.config.get("LOCAL_DEVICE_ID_PREFIX", "controller-local")
-        safe_scene = scene_id or "default"
-        return f"{prefix}-{safe_scene}"
 
     def load_auto_strip_snapshot(
         self, db: sqlite3.Connection, device_id: str

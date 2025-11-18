@@ -270,55 +270,7 @@ def create_app() -> Flask:
     # _safe_scene_data, _safe_json_dict, _safe_json_list moved to server.utils
 
     # _load_auto_strip_snapshot, _local_device_id_for_scene moved to DeviceService
-
-    def _seed_local_device_for_scene(db: sqlite3.Connection, scene_id: str) -> None:
-        if not app.config.get("IS_CONTROLLER", True):
-            return
-        env_configs: list[LightStripConfig] = app.config.get("STRIP_CONFIGS", [])
-        if not env_configs:
-            return
-
-        # Get device service from config (created later in create_app)
-        device_service = app.config.get("DEVICE_SERVICE")
-        if device_service:
-            device_id = device_service.local_device_id_for_scene(scene_id)
-        else:
-            # Fallback if DeviceService not yet created
-            prefix = app.config.get("LOCAL_DEVICE_ID_PREFIX", "controller-local")
-            safe_scene = scene_id or "default"
-            device_id = f"{prefix}-{safe_scene}"
-        existing = db.execute(
-            "SELECT id FROM devices WHERE id = ?", (device_id,)
-        ).fetchone()
-        if existing:
-            return
-
-        _log_device_debug(
-            "Seeding controller device for scene",
-            scene_id=scene_id,
-            device_id=device_id,
-            strip_count=len(env_configs),
-        )
-        ip_address = os.getenv("HOUSE_LIGHTS_DEVICE_IP") or "127.0.0.1"
-        strips_payload = [
-            {
-                "id": f"{device_id}-pin-{config.pin}",
-                "gpioPin": config.pin,
-                "ledCount": config.led_count,
-            }
-            for config in env_configs
-        ]
-        _persist_device_graph(
-            db,
-            device_id=device_id,
-            scene_id=scene_id,
-            ip_address=ip_address,
-            position={"x": 400, "y": 300},
-            device_type="local",
-            strip_mode="auto",
-            strips=strips_payload,
-        )
-        db.commit()
+    # _seed_local_device_for_scene removed - devices are now global, not scene-specific
 
     def _device_identity_payload() -> dict[str, object]:
         """Get device identity, using DeviceService if available."""
@@ -477,7 +429,6 @@ def create_app() -> Flask:
         db: sqlite3.Connection,
         *,
         device_id: str,
-        scene_id: str,
         ip_address: str,
         position: dict[str, float] | None = None,
         device_type: str = "wifi",
@@ -489,7 +440,6 @@ def create_app() -> Flask:
         if persistence_service:
             return persistence_service.persist_device_graph(
                 device_id=device_id,
-                scene_id=scene_id,
                 ip_address=ip_address,
                 position=position,
                 device_type=device_type,
@@ -502,7 +452,6 @@ def create_app() -> Flask:
         return _persist_device_graph_fallback(
             db,
             device_id=device_id,
-            scene_id=scene_id,
             ip_address=ip_address,
             position=position,
             device_type=device_type,
@@ -514,7 +463,6 @@ def create_app() -> Flask:
         db: sqlite3.Connection,
         *,
         device_id: str,
-        scene_id: str,
         ip_address: str,
         position: dict[str, float] | None = None,
         device_type: str = "wifi",
@@ -543,7 +491,6 @@ def create_app() -> Flask:
         _log_device_debug(
             "Persist device graph",
             device_id=device_id,
-            scene_id=scene_id,
             device_type=device_type,
             incoming_strip_count=len(strips or []),
             normalized_strip_mode=normalized_strip_mode,
@@ -554,10 +501,9 @@ def create_app() -> Flask:
 
         db.execute(
             """
-            INSERT INTO devices (id, scene_id, position_x, position_y, ip_address, device_type, strip_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO devices (id, position_x, position_y, ip_address, device_type, strip_mode)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-                scene_id = excluded.scene_id,
                 position_x = excluded.position_x,
                 position_y = excluded.position_y,
                 ip_address = excluded.ip_address,
@@ -565,14 +511,13 @@ def create_app() -> Flask:
                 strip_mode = excluded.strip_mode,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (device_id, scene_id, pos_x, pos_y, persisted_ip, persisted_type, normalized_strip_mode),
+            (device_id, pos_x, pos_y, persisted_ip, persisted_type, normalized_strip_mode),
         )
 
         if normalized_strip_mode == "manual":
             _log_device_debug(
                 "Persist skip (manual mode)",
                 device_id=device_id,
-                scene_id=scene_id,
             )
             return
 
@@ -707,7 +652,6 @@ def create_app() -> Flask:
     def _ensure_local_device_strips(
         db: sqlite3.Connection,
         *,
-        scene_id: str,
         device_row: sqlite3.Row,
     ) -> list[dict[str, object]]:
         """Ensure local device strips - delegates to DevicePersistenceService."""
@@ -716,7 +660,6 @@ def create_app() -> Flask:
             env_configs: list[LightStripConfig] = app.config.get("STRIP_CONFIGS", [])
             if env_configs:
                 return persistence_service.ensure_local_device_strips(
-                    scene_id=scene_id,
                     device_id=device_row["id"],
                     strip_configs=env_configs,
                 )
@@ -732,7 +675,6 @@ def create_app() -> Flask:
         base_y = device_row["position_y"]
         _log_device_debug(
             "Seeding local device strips",
-            scene_id=scene_id,
             device_id=device_id,
             strip_count=len(env_configs),
         )
@@ -1291,17 +1233,14 @@ def create_app() -> Flask:
     # @app.get("/api/v2/scenes/<scene_id>/devices") - moved to blueprint
     @app.get("/api/v2/scenes/<scene_id>/devices")
     def get_scene_devices_legacy(scene_id: str):
-        """Get all devices for a scene."""
+        """Get all devices (global scope - devices are not tied to scenes)."""
         db = get_db(app)
-        _seed_local_device_for_scene(db, scene_id)
         devices = db.execute(
             """
             SELECT id, position_x, position_y, ip_address, device_type, strip_mode
             FROM devices
-            WHERE scene_id = ?
             ORDER BY created_at ASC
-            """,
-            (scene_id,),
+            """
         ).fetchall()
         _log_device_debug(
             "Devices query",
@@ -1378,7 +1317,6 @@ def create_app() -> Flask:
         ):
             strips_with_leds = _ensure_local_device_strips(
                 db,
-                scene_id=scene_id,
                 device_row=device_row,
             )
 
@@ -1513,7 +1451,6 @@ def create_app() -> Flask:
         persisted_id = _persist_device_graph(
             db,
             device_id=device_id,
-            scene_id=scene_id,
             ip_address=ip_address,
             position=position,
             device_type=device_type,
@@ -1529,10 +1466,7 @@ def create_app() -> Flask:
     def initiate_device_handshake_legacy():
         """Connect to a remote device and persist its metadata."""
         data = request.get_json(silent=True) or {}
-        scene_id = data.get("sceneId")
-        if not isinstance(scene_id, str) or not scene_id.strip():
-            abort(400, description="sceneId is required.")
-        scene_id = scene_id.strip()
+        scene_id = data.get("sceneId")  # Optional, kept for backward compatibility but not used
 
         ip_address = data.get("ipAddress") or data.get("address")
         if not isinstance(ip_address, str) or not ip_address.strip():
@@ -1585,7 +1519,7 @@ def create_app() -> Flask:
             error_message = str(exc)
 
         db = get_db(app)
-        _ensure_scene_exists(db, scene_id)
+        # Note: scene_id is no longer required for device handshake (devices are global)
 
         persisted_id: str | None = None
         device_payload = metadata_payload or {}
@@ -1605,7 +1539,6 @@ def create_app() -> Flask:
             persisted_id = _persist_device_graph(
                 db,
                 device_id=device_id,
-                scene_id=scene_id,
                 ip_address=ip_address,
                 position=data.get("position"),
                 device_type=device_payload.get("deviceType", "follower"),
@@ -1768,7 +1701,7 @@ def create_app() -> Flask:
         ).fetchone()
         device_row = db.execute(
             """
-            SELECT id, scene_id, ip_address, device_type, strip_mode
+            SELECT id, ip_address, device_type, strip_mode
             FROM devices
             WHERE id = ?
             """,
@@ -1801,7 +1734,7 @@ def create_app() -> Flask:
 
         payload = {
             "deviceId": device_id,
-            "sceneId": device_row["scene_id"] if device_row else None,
+            "sceneId": None,  # Devices are global, not tied to scenes
             "ipAddress": device_row["ip_address"] if device_row else None,
             "deviceType": device_row["device_type"] if device_row else None,
             "stripMode": device_row["strip_mode"] if device_row else None,
@@ -2099,7 +2032,7 @@ def create_app() -> Flask:
 
         device_snapshot_before = db.execute(
             """
-            SELECT scene_id, position_x, position_y, ip_address, device_type, strip_mode
+            SELECT position_x, position_y, ip_address, device_type, strip_mode
             FROM devices
             WHERE id = ?
             """,
@@ -2203,7 +2136,7 @@ def create_app() -> Flask:
         
         device_snapshot_after = db.execute(
             """
-            SELECT scene_id, position_x, position_y, ip_address, device_type, strip_mode
+            SELECT position_x, position_y, ip_address, device_type, strip_mode
             FROM devices
             WHERE id = ?
             """,
@@ -2219,7 +2152,6 @@ def create_app() -> Flask:
                 ):
                     strips_payload = _ensure_local_device_strips(
                         db,
-                        scene_id=device_snapshot_after["scene_id"],
                         device_row=device_snapshot_after,
                     )
                     auto_seeded = bool(strips_payload)
@@ -2234,7 +2166,6 @@ def create_app() -> Flask:
                         _persist_device_graph(
                             db,
                             device_id=device_id,
-                            scene_id=device_snapshot_after["scene_id"],
                             ip_address=device_snapshot_after["ip_address"],
                             position={
                                 "x": device_snapshot_after["position_x"],

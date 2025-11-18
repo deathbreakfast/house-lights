@@ -89,6 +89,7 @@ def _init_db(db: sqlite3.Connection) -> None:
             FOREIGN KEY (scene_id) REFERENCES scenes(id) ON DELETE CASCADE
         )
     """)
+    # Note: scene_id column is deprecated and will be removed by migration (devices are now global)
     
     db.execute("""
         CREATE TABLE IF NOT EXISTS led_strips (
