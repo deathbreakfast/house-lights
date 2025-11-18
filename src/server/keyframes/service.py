@@ -227,16 +227,55 @@ class KeyframeService:
                     list(led_states_by_device.keys()),
                 )
                 
-                # Send filtered LED states to each device via WebSocket
+                # Query device IPs from database to determine local vs remote
+                # Device names are configured in UI, not from hostname
+                local_ips = ("127.0.0.1", "localhost", "::1")
+                device_ips: dict[str, str] = {}
+                local_device_ids: set[str] = set()
+                
+                if led_states_by_device:
+                    try:
+                        from ...database import get_db
+                        db = get_db(self.app)
+                        device_ids_list = list(led_states_by_device.keys())
+                        placeholders = ",".join("?" for _ in device_ids_list)
+                        rows = db.execute(
+                            f"""
+                            SELECT id, ip_address FROM devices
+                            WHERE id IN ({placeholders})
+                            """,
+                            device_ids_list,
+                        ).fetchall()
+                        device_ips = {row["id"]: row["ip_address"] for row in rows}
+                        
+                        # Identify local devices based on IP address from database
+                        for device_id, ip_address in device_ips.items():
+                            if ip_address in local_ips:
+                                local_device_ids.add(device_id)
+                    except Exception as exc:
+                        logger.debug("Error querying device IPs: %s", exc)
+                
+                # Send filtered LED states to each remote device via WebSocket
+                # Skip devices with localhost IPs (they'll be applied locally)
                 all_results: dict[str, bool] = {}
                 ws_clients = self.app.config.get("WS_CLIENTS", {})
                 
                 for target_device_id, device_led_states in led_states_by_device.items():
-                    if target_device_id in ws_clients:
-                        # Send to specific device via WebSocket
+                    # Skip local devices - they'll be applied to local hardware
+                    if target_device_id in local_device_ids:
                         logger.debug(
-                            "Sending live_frame to device %s with %d LEDs",
+                            "Skipping WebSocket for local device %s (ip=%s), will apply to local hardware",
                             target_device_id,
+                            device_ips.get(target_device_id, "unknown"),
+                        )
+                        continue
+                    
+                    if target_device_id in ws_clients:
+                        # Send to specific remote device via WebSocket
+                        logger.debug(
+                            "Sending live_frame to remote device %s (ip=%s) with %d LEDs",
+                            target_device_id,
+                            device_ips.get(target_device_id, "unknown"),
                             len(device_led_states),
                         )
                         device_results = device_service.send_ws_command(
@@ -252,31 +291,9 @@ class KeyframeService:
                 
                 logger.info("live_frame commands sent - results=%s", all_results)
                 
-                # Always apply to local hardware if this is the controller (regardless of WebSocket clients)
-                if self.app.config.get("IS_CONTROLLER", False):
-                    # Get the controller's actual device ID (global, not scene-specific)
-                    # This matches what's used in LED IDs (from hostname or HOUSE_LIGHTS_DEVICE_ID)
-                    local_device_identity = device_service.device_identity_payload()
-                    actual_local_device_id = local_device_identity["deviceId"]  # e.g., "houselights"
-                    
-                    # Also check database for any devices with localhost IP as fallback
-                    local_device_ids = {actual_local_device_id}
-                    try:
-                        from ...database import get_db
-                        db = get_db(self.app)
-                        local_ips = ("127.0.0.1", "localhost", "::1")
-                        rows = db.execute(
-                            """
-                            SELECT id FROM devices
-                            WHERE ip_address IN (?, ?, ?)
-                            """,
-                            local_ips,
-                        ).fetchall()
-                        local_device_ids.update(row["id"] for row in rows)
-                    except Exception as exc:
-                        logger.debug("Error querying local devices: %s", exc)
-                    
-                    # Apply LED states for any local devices found
+                # Apply LED states to local hardware for devices with localhost IPs
+                # Only devices configured in UI with localhost IP will be applied locally
+                if self.app.config.get("IS_CONTROLLER", False) and local_device_ids:
                     local_led_states: dict[str, dict[str, object]] = {}
                     for device_id in local_device_ids:
                         if device_id in led_states_by_device:
@@ -292,9 +309,8 @@ class KeyframeService:
                         apply_live_frame_to_hardware(self.app, local_led_states)
                     else:
                         logger.debug(
-                            "No LED states for local devices %s in this frame (found devices: %s)",
+                            "No LED states for local devices %s in this frame",
                             local_device_ids,
-                            list(led_states_by_device.keys()),
                         )
             else:
                 logger.warning("DEVICE_SERVICE not available, cannot send live_frame command")

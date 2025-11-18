@@ -264,6 +264,10 @@ class Ws2811LightController:
         
         # LED IDs are typically: "{device_id}-{strip_id}-led-{index}" or "{device_id}-pin-{pin}-led-{index}"
         # We need to parse them to extract pin and index
+        parsed_count = 0
+        skipped_count = 0
+        sample_skipped_ids = []
+        
         for led_id, led_state in led_states.items():
             try:
                 # Parse LED ID to extract pin and index
@@ -286,7 +290,10 @@ class Ws2811LightController:
                             pass
                 
                 if pin is None or index is None:
-                    # Try alternative parsing or skip
+                    skipped_count += 1
+                    if len(sample_skipped_ids) < 5:
+                        sample_skipped_ids.append(led_id)
+                    LOGGER.debug("Failed to parse LED ID %s: pin=%s, index=%s, parts=%s", led_id, pin, index, parts)
                     continue
                 
                 # Get color and opacity
@@ -306,9 +313,22 @@ class Ws2811LightController:
                 strip = self._strip_by_pin.get(pin)
                 if strip and 0 <= index < strip.numPixels():
                     strip.setPixelColor(index, self._encode_color(r, g, b))
+                    parsed_count += 1
+                else:
+                    skipped_count += 1
+                    LOGGER.debug("LED ID %s: strip not found for pin=%s or index=%s out of range (strip=%s, pixels=%s)", 
+                               led_id, pin, index, strip is not None, strip.numPixels() if strip else 0)
             
             except Exception as exc:
+                skipped_count += 1
                 LOGGER.warning("Error applying LED state for %s: %s", led_id, exc)
+        
+        # Log summary
+        if skipped_count > 0:
+            LOGGER.warning("LED application: %d parsed, %d skipped out of %d total. Sample skipped IDs: %s", 
+                          parsed_count, skipped_count, len(led_states), sample_skipped_ids[:5])
+        else:
+            LOGGER.debug("LED application: %d LEDs successfully applied", parsed_count)
         
         # Show all changes at once
         for strip in self._strips:
@@ -441,7 +461,7 @@ class PatternPlaybackWorker:
                             strip_frame_list.append(int(pixel_value))
                         else:
                             strip_frame_list.append(default_state)
-                    else:
+            else:
                         strip_frame_list.append(default_state)
 
                 current_frame[pin] = strip_frame_list
