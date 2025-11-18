@@ -107,10 +107,20 @@ export const SceneViewer: React.FC<SceneViewerProps> = ({
       powerOn,
     };
 
+    console.log("SceneViewer: Rendering canvas", {
+      deviceCount: devices.length,
+      devices: devices.map(d => ({
+        id: d.id,
+        stripCount: d.strips?.length ?? 0,
+        totalLEDs: d.strips?.reduce((sum, s) => sum + (s.leds?.length ?? 0), 0) ?? 0,
+        strips: d.strips?.map(s => ({ id: s.id, gpioPin: s.gpioPin, ledCount: s.ledCount, ledCount_actual: s.leds?.length ?? 0 })) ?? []
+      }))
+    });
     renderCanvas(options);
   }, [
     canvasRef,
     scene,
+    devices,
     effectiveFrameLedState,
     backgroundImage,
     backgroundImageScale,

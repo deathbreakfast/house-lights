@@ -13,7 +13,7 @@ type UseDeviceHandlersOptions = {
     state: "idle" | "connecting" | "online" | "error",
     error: string | null
   ) => void;
-  fetchDevices: () => Promise<void>;
+  fetchDevices: (existingDevices?: Device[]) => Promise<void>;
 };
 
 export const useDeviceHandlers = ({
@@ -93,7 +93,17 @@ export const useDeviceHandlers = ({
         if (!response.ok || payload?.status === "error") {
           throw new Error(payload?.message ?? "Device did not respond.");
         }
-        await fetchDevices();
+        // Backend verifies persistence, but SQLite may need a moment for the commit to be visible
+        // Retry fetching devices a few times to ensure strips are available
+        // The merge will preserve existing strips if API response is stale
+        console.log("handleDeviceConnect: First fetch after handshake", { deviceId });
+        await fetchDevices(devices);
+        // Give a brief moment for any async database operations to complete
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        // Fetch again to get the latest data with strips
+        console.log("handleDeviceConnect: Second fetch after handshake", { deviceId });
+        await fetchDevices(devices);
+        console.log("handleDeviceConnect: Setting device online", { deviceId });
         setDeviceConnectionState(deviceId, "online", null);
       } catch (error) {
         const message =

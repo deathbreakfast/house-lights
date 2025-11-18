@@ -9,6 +9,7 @@ type UseLiveModeKeyframeOptions = {
   currentSceneId: string;
   timelinePosition: number;
   frameLedState: Keyframe["ledStates"];
+  isPlaying: boolean;
   applyKeyframe: (
     sceneId: string,
     timestamp: number,
@@ -22,10 +23,13 @@ export const useLiveModeKeyframe = ({
   currentSceneId,
   timelinePosition,
   frameLedState,
+  isPlaying,
   applyKeyframe,
 }: UseLiveModeKeyframeOptions) => {
   useEffect(() => {
-    if (!powerOn || !liveMode) {
+    // Only apply frames when playing in live mode
+    // When paused, frames are applied immediately on change via commitLedUpdates
+    if (!powerOn || !liveMode || !isPlaying) {
       return;
     }
     const timestamp = Math.round(timelinePosition);
@@ -43,6 +47,7 @@ export const useLiveModeKeyframe = ({
     frameLedState,
     liveMode,
     powerOn,
+    isPlaying,
     timelinePosition,
     applyKeyframe,
   ]);

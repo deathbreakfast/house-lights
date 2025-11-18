@@ -2554,27 +2554,78 @@ def create_app() -> Flask:
     @app.post("/api/v2/playback/<scene_id>/start")
     def start_scene_playback(scene_id: str):
         """Mark a scene as playing."""
+        payload = request.get_json(silent=True) or {}
         playback_state = app.config.setdefault("PLAYBACK_STATE", {})
         playback_state[scene_id] = {
             "status": "playing",
             "startedAt": now_iso(),
         }
         LOGGER.info("Playback started for scene %s", scene_id)
-        if not app.config.get("LIVE_MODE_ENABLED"):
+        
+        is_live_mode = app.config.get("LIVE_MODE_ENABLED", False)
+        
+        if is_live_mode:
+            # In live mode, apply current frame and send play command
+            timestamp_ms = payload.get("timestamp")
+            led_states = payload.get("ledStates", {})
+            
+            if timestamp_ms is not None and led_states:
+                from .server.keyframes.service import KeyframeService
+                keyframe_service = KeyframeService(app)
+                keyframe_service.apply_keyframe(
+                    scene_id=scene_id,
+                    timestamp_ms=int(timestamp_ms),
+                    led_states=led_states,
+                )
+            
+            # Send live play command
+            _send_ws_command(
+                command="live_play",
+                payload={"sceneId": scene_id, "timestamp": timestamp_ms},
+            )
+        else:
+            # Non-live mode: dispatch playlists
             _maybe_dispatch_playlists()
-        _send_ws_command(command="playlist_play", payload={"sceneId": scene_id})
+            _send_ws_command(command="playlist_play", payload={"sceneId": scene_id})
+        
         return jsonify(playback_state[scene_id])
 
     @app.post("/api/v2/playback/<scene_id>/stop")
     def stop_scene_playback(scene_id: str):
         """Mark a scene as stopped."""
+        payload = request.get_json(silent=True) or {}
         playback_state = app.config.setdefault("PLAYBACK_STATE", {})
         playback_state[scene_id] = {
             "status": "stopped",
             "stoppedAt": now_iso(),
         }
         LOGGER.info("Playback stopped for scene %s", scene_id)
-        _send_ws_command(command="playlist_pause", payload={"sceneId": scene_id})
+        
+        is_live_mode = app.config.get("LIVE_MODE_ENABLED", False)
+        
+        if is_live_mode:
+            # In live mode, apply current frame to ensure LEDs match current frame when paused
+            timestamp_ms = payload.get("timestamp")
+            led_states = payload.get("ledStates", {})
+            
+            if timestamp_ms is not None and led_states:
+                from .server.keyframes.service import KeyframeService
+                keyframe_service = KeyframeService(app)
+                keyframe_service.apply_keyframe(
+                    scene_id=scene_id,
+                    timestamp_ms=int(timestamp_ms),
+                    led_states=led_states,
+                )
+            
+            # Send live pause command
+            _send_ws_command(
+                command="live_pause",
+                payload={"sceneId": scene_id, "timestamp": timestamp_ms},
+            )
+        else:
+            # Non-live mode: send playlist pause
+            _send_ws_command(command="playlist_pause", payload={"sceneId": scene_id})
+        
         return jsonify(playback_state[scene_id])
 
     # @app.post("/api/v2/devices/playback") - moved to blueprint

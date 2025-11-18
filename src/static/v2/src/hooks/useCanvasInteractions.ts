@@ -83,6 +83,14 @@ type UseCanvasInteractionsOptions = {
   selectedBackgroundImage: boolean;
   skipNextClickRef: React.MutableRefObject<boolean>;
   draggedDuringInteractionRef: React.MutableRefObject<boolean>;
+  liveMode?: boolean;
+  isPlaying?: boolean;
+  timelinePosition?: number;
+  applyKeyframe?: (
+    sceneId: string,
+    timestamp: number,
+    ledStates: Record<string, { color: string; opacity: number }>
+  ) => Promise<AbortController>;
 };
 
 export const useCanvasInteractions = ({
@@ -134,6 +142,10 @@ export const useCanvasInteractions = ({
   selectedBackgroundImage,
   skipNextClickRef,
   draggedDuringInteractionRef,
+  liveMode = false,
+  isPlaying = false,
+  timelinePosition = 0,
+  applyKeyframe,
 }: UseCanvasInteractionsOptions) => {
   const { openDrawer, closeDrawer, isOpen } = useDrawer();
   const paintedLedsRef = useRef<Set<string>>(new Set());
@@ -403,6 +415,15 @@ export const useCanvasInteractions = ({
         notificationManager.apiError("Error persisting keyframe", error);
       });
       await persistLedUpdates(normalized);
+
+      // If in live mode and paused, immediately apply the frame to hardware
+      if (liveMode && !isPlaying && applyKeyframe && keyframeMeta) {
+        applyKeyframe(currentSceneId, keyframeMeta.timestamp, payloadLedStates).catch(
+          (error) => {
+            console.error("Error applying frame to hardware in live mode:", error);
+          }
+        );
+      }
     },
     [
       applyLedUpdates,
@@ -412,6 +433,9 @@ export const useCanvasInteractions = ({
       runWithHistoryBatch,
       updateKeyframe,
       currentSceneId,
+      liveMode,
+      isPlaying,
+      applyKeyframe,
     ]
   );
 

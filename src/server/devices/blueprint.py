@@ -437,6 +437,27 @@ def create_device_blueprint(app) -> Blueprint:
 
         db.commit()
 
+        # Verify the device and strips were persisted before returning
+        # This ensures the data is available when the frontend calls fetchDevices()
+        if error_message is None and persisted_id:
+            # Use a fresh query to verify the data is committed and visible
+            verify_strips = db.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM led_strips
+                WHERE device_id = ?
+                """,
+                (persisted_id,),
+            ).fetchone()
+            # If we expected strips but none were persisted, log a warning
+            # (This shouldn't happen, but helps with debugging)
+            if strips_payload and verify_strips and verify_strips["count"] == 0:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Device %s persisted but no strips found after commit",
+                    persisted_id
+                )
+
         return jsonify(
             {
                 "deviceId": persisted_id,

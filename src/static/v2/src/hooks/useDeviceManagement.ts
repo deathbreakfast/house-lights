@@ -14,7 +14,7 @@ type UseDeviceManagementOptions = {
   setDevices: (devices: Device[]) => void;
   setSelectedDeviceId: (id: string | null) => void;
   setSelectedLEDId: (id: string | null) => void;
-  fetchDevices: () => Promise<void>;
+  fetchDevices: (existingDevices?: Device[]) => Promise<void>;
 };
 
 export const useDeviceManagement = ({
@@ -85,7 +85,7 @@ export const useDeviceManagement = ({
         },
         body: JSON.stringify(newDevice),
       });
-      await fetchDevices();
+      await fetchDevices(devices);
     } catch (error) {
       console.error("Error saving new device:", error);
     }
@@ -333,7 +333,7 @@ export const useDeviceManagement = ({
         },
         body: JSON.stringify(defaultDevice),
       });
-      await fetchDevices();
+      await fetchDevices(devices);
     } catch (error) {
       console.error("Error saving default device:", error);
     }
@@ -363,7 +363,7 @@ export const useDeviceManagement = ({
           },
           body: JSON.stringify({ stripMode: mode }),
         });
-        await fetchDevices();
+        await fetchDevices(devices);
       } catch (error) {
         console.error("Error saving device strip mode:", error);
       }

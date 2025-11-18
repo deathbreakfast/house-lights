@@ -305,6 +305,11 @@ export const LEDSceneEditor: React.FC = () => {
     setDevices,
     updateDevice: updateGlobalDevice,
   });
+  
+  // Create a wrapper that passes existing devices to preserve state
+  const fetchDevicesWithState = useCallback(() => {
+    return fetchDevices(devices);
+  }, [fetchDevices, devices]);
 
   // Device/strip management (must come after useDevices for fetchSceneDevices)
   const {
@@ -464,6 +469,7 @@ export const LEDSceneEditor: React.FC = () => {
     currentSceneId,
     timelinePosition,
     frameLedState,
+    isPlaying,
     applyKeyframe,
   });
 
@@ -603,6 +609,10 @@ export const LEDSceneEditor: React.FC = () => {
     selectedBackgroundImage,
     skipNextClickRef,
     draggedDuringInteractionRef,
+    liveMode,
+    isPlaying,
+    timelinePosition,
+    applyKeyframe,
   });
 
   // Timeline interactions hook
@@ -712,6 +722,10 @@ export const LEDSceneEditor: React.FC = () => {
     toggleTimelinePlayback,
     timelineDuration,
     updateSceneDuration,
+    liveMode,
+    timelinePosition,
+    frameLedState,
+    applyKeyframe,
   });
 
 
@@ -795,26 +809,46 @@ export const LEDSceneEditor: React.FC = () => {
     handleRemovePlaylistEntriesBySceneId,
   });
 
+  // Memoize the drawer data value to ensure it updates when devices change
+  const drawerDataValue = React.useMemo(
+    () => ({
+      devices,
+      timelinePosition,
+      frameLedState,
+      onColorChange: handleColorChange,
+      onOpacityChange: handleOpacityChange,
+      onKeyframeEffectsChange: handleKeyframeEffectsChange,
+      onBackgroundImageScaleChange: handleBackgroundImageScaleChange,
+      onDeviceIpChange: handleDeviceIpChange,
+      onDeviceConnect: handleDeviceConnect,
+      onDeviceStripModeChange: handleDeviceStripModeChange,
+      onAddStrip: handleAddStrip,
+      onRemoveStrip: handleRemoveStrip,
+      onUpdateStrip: handleUpdateStrip,
+      onResetDevices: handleResetDevices,
+      onDeleteKeyframe: handleDeleteKeyframe,
+    }),
+    [
+      devices,
+      timelinePosition,
+      frameLedState,
+      handleColorChange,
+      handleOpacityChange,
+      handleKeyframeEffectsChange,
+      handleBackgroundImageScaleChange,
+      handleDeviceIpChange,
+      handleDeviceConnect,
+      handleDeviceStripModeChange,
+      handleAddStrip,
+      handleRemoveStrip,
+      handleUpdateStrip,
+      handleResetDevices,
+      handleDeleteKeyframe,
+    ]
+  );
+
   return (
-    <DrawerDataProvider
-      value={{
-        devices,
-        timelinePosition,
-        frameLedState,
-        onColorChange: handleColorChange,
-        onOpacityChange: handleOpacityChange,
-        onKeyframeEffectsChange: handleKeyframeEffectsChange,
-        onBackgroundImageScaleChange: handleBackgroundImageScaleChange,
-        onDeviceIpChange: handleDeviceIpChange,
-        onDeviceConnect: handleDeviceConnect,
-        onDeviceStripModeChange: handleDeviceStripModeChange,
-        onAddStrip: handleAddStrip,
-        onRemoveStrip: handleRemoveStrip,
-        onUpdateStrip: handleUpdateStrip,
-        onResetDevices: handleResetDevices,
-        onDeleteKeyframe: handleDeleteKeyframe,
-      }}
-    >
+    <DrawerDataProvider value={drawerDataValue}>
       <EditorLayout fileInputRef={fileInputRef} audioInputRef={audioInputRef}>
       <div className="flex-1 relative">
         <SceneViewer
