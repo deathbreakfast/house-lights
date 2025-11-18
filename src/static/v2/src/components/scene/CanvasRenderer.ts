@@ -105,33 +105,15 @@ export const drawDevicesAndLEDs = (options: RenderOptions) => {
     ctx.fillStyle = "#ffffff";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    if (device.type === "wifi") {
-      ctx.strokeStyle = "#ffffff";
-      ctx.beginPath();
-      ctx.arc(device.position.x, device.position.y + 2, 4, Math.PI, 0, false);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(device.position.x, device.position.y + 2, 8, Math.PI, 0, false);
-      ctx.stroke();
-      ctx.fillRect(device.position.x - 1.5, device.position.y + 5, 3, 3);
-    } else if (device.type === "local") {
-      // Local device icon (CPU/chip icon)
-      ctx.fillRect(device.position.x - 6, device.position.y - 6, 12, 12);
-      ctx.strokeStyle = "#3b82f6";
-      ctx.lineWidth = 1;
-      ctx.strokeRect(device.position.x - 8, device.position.y - 8, 16, 16);
-    } else if (device.type === "virtual") {
-      // Virtual device icon (radio/waves)
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
-      // Draw concentric arcs for virtual device
-      ctx.beginPath();
-      ctx.arc(device.position.x, device.position.y, 6, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(device.position.x, device.position.y, 10, 0, Math.PI * 2);
-      ctx.stroke();
-    }
+    // Device icon (WiFi icon for all devices)
+    ctx.strokeStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(device.position.x, device.position.y + 2, 4, Math.PI, 0, false);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(device.position.x, device.position.y + 2, 8, Math.PI, 0, false);
+    ctx.stroke();
+    ctx.fillRect(device.position.x - 1.5, device.position.y + 5, 3, 3);
 
     device.strips.forEach((strip) => {
       strip.leds.forEach((led, index) => {

@@ -34,7 +34,7 @@ export type Device = {
   position: Point;
   ipAddress: string;
   strips: LEDStrip[];
-  type: "local" | "wifi" | "virtual";
+  type: "wifi"; // Device type is simplified - local devices are identified by IP (127.0.0.1/localhost)
   stripMode: "auto" | "manual"; // Auto uses env variables, manual is user-configured
   connectionState?: DeviceConnectionState;
   connectionError?: string | null;

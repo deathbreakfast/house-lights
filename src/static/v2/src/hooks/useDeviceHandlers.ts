@@ -24,42 +24,6 @@ export const useDeviceHandlers = ({
   setDeviceConnectionState,
   fetchDevices,
 }: UseDeviceHandlersOptions) => {
-  const handleDeviceTypeChange = useCallback(
-    async (deviceId: string, type: "local" | "wifi" | "virtual") => {
-      // Prevent changing the first device's type (it must be local)
-      const firstDevice = devices[0];
-      if (firstDevice && firstDevice.id === deviceId && firstDevice.type === "local") {
-        return; // Don't allow changing the first device's type
-      }
-      setDevices(devices.map((device) => {
-        if (device.id !== deviceId) {
-          return device;
-        }
-        // Set stripMode based on device type
-        // Local and WiFi default to auto, Virtual defaults to manual
-        const stripMode = type === "virtual" ? "manual" : "auto";
-        return { ...device, type, stripMode };
-      }));
-      
-      // Save to backend
-      try {
-        await fetch(`/api/v2/devices/${deviceId}`, {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            type,
-            stripMode: type === "virtual" ? "manual" : "auto",
-          }),
-        });
-      } catch (error) {
-        console.error("Error saving device type:", error);
-      }
-    },
-    [devices, setDevices]
-  );
-
   const handleDeviceIpChange = useCallback(
     (deviceId: string, ipAddress: string) => {
       updateDevice(deviceId, (device) => ({
@@ -76,7 +40,7 @@ export const useDeviceHandlers = ({
   const handleDeviceConnect = useCallback(
     async (deviceId: string) => {
       const device = devices.find((d) => d.id === deviceId);
-      if (!device || device.type !== "wifi") {
+      if (!device) {
         return;
       }
       const ipAddress = device.ipAddress.trim();
@@ -148,7 +112,6 @@ export const useDeviceHandlers = ({
   );
 
   return {
-    handleDeviceTypeChange,
     handleDeviceIpChange,
     handleDeviceConnect,
   };

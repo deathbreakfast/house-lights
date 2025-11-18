@@ -150,7 +150,6 @@ export const useSceneStore = (options: SceneStoreOptions = {}) => {
   const [selectedLEDId, setSelectedLEDId] = useState<string | null>(null);
   const [selectedKeyframeId, setSelectedKeyframeId] = useState<string | null>(null);
   const [selectedBackgroundImage, setSelectedBackgroundImage] = useState(false);
-  const [showPropertiesPanel, setShowPropertiesPanel] = useState(false);
   const [selectedColor, setSelectedColor] = useState("#ff0000");
   const [selectedOpacity, setSelectedOpacity] = useState(1);
 
@@ -461,9 +460,6 @@ export const useSceneStore = (options: SceneStoreOptions = {}) => {
         setSelectedLEDId(null);
         setSelectedKeyframeId(null);
       }
-      if (opts?.openProperties !== undefined) {
-        setShowPropertiesPanel(opts.openProperties);
-      }
     },
     []
   );
@@ -474,9 +470,6 @@ export const useSceneStore = (options: SceneStoreOptions = {}) => {
       if (ledId) {
         setSelectedDeviceId(null);
         setSelectedKeyframeId(null);
-      }
-      if (opts?.openProperties !== undefined) {
-        setShowPropertiesPanel(opts.openProperties);
       }
     },
     []
@@ -490,9 +483,6 @@ export const useSceneStore = (options: SceneStoreOptions = {}) => {
         setSelectedLEDId(null);
         setSelectedBackgroundImage(false);
       }
-      if (opts?.openProperties !== undefined) {
-        setShowPropertiesPanel(opts.openProperties);
-      }
     },
     []
   );
@@ -503,9 +493,6 @@ export const useSceneStore = (options: SceneStoreOptions = {}) => {
       setSelectedDeviceId(null);
       setSelectedLEDId(null);
       setSelectedKeyframeId(null);
-      if (opts?.openProperties !== undefined) {
-        setShowPropertiesPanel(opts.openProperties);
-      }
     },
     []
   );
@@ -532,8 +519,6 @@ export const useSceneStore = (options: SceneStoreOptions = {}) => {
     setSelectedKeyframeId,
     selectedBackgroundImage,
     setSelectedBackgroundImage,
-    showPropertiesPanel,
-    setShowPropertiesPanel,
     selectedColor,
     setSelectedColor,
     selectedOpacity,

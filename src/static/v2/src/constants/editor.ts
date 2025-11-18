@@ -11,7 +11,7 @@ export const DEFAULT_SCENE: Scene = {
       position: { x: 400, y: 300 },
       ipAddress: "127.0.0.1",
       strips: [],
-      type: "local",
+      type: "wifi",
       stripMode: "auto",
       connectionState: "online",
       connectionError: null,

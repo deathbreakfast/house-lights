@@ -1,6 +1,7 @@
 import React from "react";
 import { motion } from "framer-motion";
 import { GripVertical } from "lucide-react";
+import { useDrawer } from "../../context/DrawerContext";
 import type { Keyframe } from "../../types/editor";
 
 interface TimelineKeyframesProps {
@@ -10,7 +11,6 @@ interface TimelineKeyframesProps {
   timelinePosition: number;
   totalDuration: number;
   selectedKeyframeId: string | null;
-  showPropertiesPanel: boolean;
   onKeyframeClick?: (keyframe: Keyframe) => void;
   onKeyframeDragStart?: (keyframeId: string, event: React.MouseEvent) => void;
   onKeyframeDrag?: (event: React.MouseEvent) => void;
@@ -25,13 +25,13 @@ export const TimelineKeyframes: React.FC<TimelineKeyframesProps> = ({
   timelinePosition,
   totalDuration,
   selectedKeyframeId,
-  showPropertiesPanel,
   onKeyframeClick,
   onKeyframeDragStart,
   onKeyframeDrag,
   onKeyframeDragEnd,
   isDraggingKeyframe = false,
 }) => {
+  const { isOpen, contentType } = useDrawer();
   const visibleStart = (timelineWindowStart / 100) * totalDuration;
   const visibleEnd = visibleStart + (timelineWindowWidth / 100) * totalDuration;
   const visibleDuration = visibleEnd - visibleStart;
@@ -45,7 +45,7 @@ export const TimelineKeyframes: React.FC<TimelineKeyframesProps> = ({
           }
           const position =
             ((keyframe.timestamp - visibleStart) / visibleDuration) * 100;
-          const isSelected = showPropertiesPanel && selectedKeyframeId === keyframe.id;
+          const isSelected = isOpen && contentType?.type === "keyframe" && contentType.keyframeId === keyframe.id;
           const canDrag = isSelected && !isDraggingKeyframe;
           
           return (

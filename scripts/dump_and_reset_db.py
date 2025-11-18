@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime
@@ -17,7 +18,13 @@ from database import _init_db
 
 
 def get_db_path() -> Path:
-    """Get the default database path."""
+    """Get the database path from environment variable or default location."""
+    # Check DATABASE_PATH environment variable first (same as Flask app)
+    db_path_env = os.getenv("DATABASE_PATH")
+    if db_path_env:
+        return Path(db_path_env)
+    
+    # Default to user's .houselights directory
     db_dir = Path.home() / ".houselights"
     return db_dir / "houselights_v2.db"
 
@@ -171,7 +178,7 @@ def main():
         "--db-path",
         type=Path,
         default=None,
-        help="Path to database file (default: ~/.houselights/houselights_v2.db)",
+        help="Path to database file (default: DATABASE_PATH env var or ~/.houselights/houselights_v2.db)",
     )
     parser.add_argument(
         "--dump",
@@ -195,6 +202,11 @@ def main():
         help="Skip backup when resetting (not recommended)",
     )
     parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt (use with caution)",
+    )
+    parser.add_argument(
         "--stats",
         action="store_true",
         help="Show database statistics",
@@ -209,14 +221,17 @@ def main():
     elif args.dump:
         dump_database(db_path, args.output)
     elif args.reset:
-        confirm = input(
-            f"⚠️  This will DELETE ALL DATA from {db_path}\n"
-            "Are you sure you want to continue? (yes/no): "
-        )
-        if confirm.lower() == "yes":
+        if args.yes:
             reset_database(db_path, backup=not args.no_backup)
         else:
-            print("Reset cancelled.")
+            confirm = input(
+                f"⚠️  This will DELETE ALL DATA from {db_path}\n"
+                "Are you sure you want to continue? (yes/no): "
+            )
+            if confirm.lower() == "yes":
+                reset_database(db_path, backup=not args.no_backup)
+            else:
+                print("Reset cancelled.")
     else:
         parser.print_help()
 

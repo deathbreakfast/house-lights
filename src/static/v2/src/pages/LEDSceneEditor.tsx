@@ -9,7 +9,8 @@ import React, {
 } from "react";
 import { EditorLayout } from "../components/layout/EditorLayout";
 import { SceneViewer } from "../components/scene/SceneViewer";
-import { PropertiesDrawer } from "../components/properties/PropertiesDrawer";
+import { PropertiesDrawerOverlay } from "../components/properties/PropertiesDrawerOverlay";
+import { DrawerDataProvider } from "../context/DrawerContext";
 import { PowerButton } from "../components/buttons/PowerButton";
 import { TopRightButtons } from "../components/buttons/TopRightButtons";
 import { ToolPalette } from "../components/buttons/ToolPalette";
@@ -67,8 +68,8 @@ import { useDevicePoller } from "../hooks/useDevicePoller";
 import { useLiveModeKeyframe } from "../hooks/useLiveModeKeyframe";
 import { useSceneNameSync } from "../hooks/useSceneNameSync";
 import { useCurrentFrameKeyframeRef } from "../hooks/useCurrentFrameKeyframeRef";
-import { usePropertiesPanel } from "../hooks/usePropertiesPanel";
 import { useKeyframeHandlers } from "../hooks/useKeyframeHandlers";
+import { useDrawer } from "../context/DrawerContext";
 import { useSceneHandlers } from "../hooks/useSceneHandlers";
 import { useDeviceHandlers } from "../hooks/useDeviceHandlers";
 import { useColorHandlers } from "../hooks/useColorHandlers";
@@ -91,8 +92,6 @@ export const LEDSceneEditor: React.FC = () => {
     setSelectedKeyframeId,
     selectedBackgroundImage,
     setSelectedBackgroundImage,
-    showPropertiesPanel,
-    setShowPropertiesPanel,
     updateCurrentScene,
     updateKeyframe,
     deleteKeyframe,
@@ -291,10 +290,20 @@ export const LEDSceneEditor: React.FC = () => {
     [baseLedState, currentScene.keyframes, timelinePosition]
   );
 
+  // Create updateDevice function for global devices
+  const updateGlobalDevice = useCallback(
+    (deviceId: string, updater: (device: Device) => Device) => {
+      setDevices(
+        devices.map((device: Device) => (device.id === deviceId ? updater(device) : device))
+      );
+    },
+    [setDevices, devices]
+  );
+
   // Device management
   const { fetchDevices, setDeviceConnectionState } = useDevices({
     setDevices,
-    updateDevice,
+    updateDevice: updateGlobalDevice,
   });
 
   // Device/strip management (must come after useDevices for fetchSceneDevices)
@@ -392,22 +401,23 @@ export const LEDSceneEditor: React.FC = () => {
   const skipNextClickRef = useRef(false);
   const draggedDuringInteractionRef = useRef(false);
 
-  // Properties panel management
-  const {
-    handlePropertiesClose,
-    handleKeyframeSelect,
-    pendingExternalCloseRef,
-    suppressNextOutsideCloseRef,
-  } = usePropertiesPanel({
-    showPropertiesPanel,
-    setShowPropertiesPanel,
-    selectedKeyframeId,
-    setSelectedKeyframeId,
-    setSelectedDeviceId,
-    setSelectedLEDId,
-    setSelectedBackgroundImage,
-  });
+  // Drawer context
+  const { openDrawer, closeDrawer, isOpen } = useDrawer();
 
+  // Keyframe selection handler
+  const handleKeyframeSelect = useCallback(
+    (keyframe: Keyframe) => {
+      if (isOpen && selectedKeyframeId === keyframe.id) {
+        closeDrawer();
+        return;
+      }
+      setSelectedKeyframeId(keyframe.id);
+      setSelectedBackgroundImage(false);
+      // Pass the keyframe object directly so drawer can use it even if state hasn't updated
+      openDrawer({ type: "keyframe", keyframeId: keyframe.id }, keyframe);
+    },
+    [isOpen, selectedKeyframeId, closeDrawer, openDrawer, setSelectedKeyframeId, setSelectedBackgroundImage]
+  );
 
   // Sync scene name to local state
   useSceneNameSync({
@@ -457,7 +467,8 @@ export const LEDSceneEditor: React.FC = () => {
     applyKeyframe,
   });
 
-  const ensureKeyframeAtCurrentFrame = useCallback(() => {
+  const ensureKeyframeAtCurrentFrame = useCallback((options?: { openDrawer?: boolean }) => {
+    const shouldOpenDrawer = options?.openDrawer ?? false;
     const snappedPosition = snapToFrame(timelinePosition);
     const cached = currentFrameKeyframeRef.current;
     if (cached && Math.abs(cached.timestamp - snappedPosition) < 0.5) {
@@ -510,8 +521,11 @@ export const LEDSceneEditor: React.FC = () => {
     };
 
     setSelectedKeyframeId(newKeyframe.id);
-    suppressNextOutsideCloseRef.current = true;
-    setShowPropertiesPanel(true);
+    // Only open drawer if explicitly requested (e.g., from "Add Keyframe" button)
+    if (shouldOpenDrawer) {
+      // Pass the new keyframe object directly so drawer can use it even if state hasn't updated
+      openDrawer({ type: "keyframe", keyframeId: newKeyframe.id }, newKeyframe);
+    }
     void saveKeyframe(currentSceneId, newKeyframe);
     return {
       keyframeId: newKeyframe.id,
@@ -522,11 +536,12 @@ export const LEDSceneEditor: React.FC = () => {
     currentScene.keyframes,
     frameLedState,
     setSelectedKeyframeId,
-    setShowPropertiesPanel,
+    openDrawer,
     snapToFrame,
     timelinePosition,
     updateCurrentScene,
     currentSceneId,
+    saveKeyframe,
   ]);
 
   // Canvas interactions hook
@@ -584,15 +599,10 @@ export const LEDSceneEditor: React.FC = () => {
     setSelectedLEDId,
     setSelectedKeyframeId,
     setSelectedBackgroundImage,
-    showPropertiesPanel,
-    setShowPropertiesPanel,
-    handlePropertiesClose,
     backgroundImage,
     selectedBackgroundImage,
     skipNextClickRef,
     draggedDuringInteractionRef,
-    suppressNextOutsideCloseRef,
-    pendingExternalCloseRef,
   });
 
   // Timeline interactions hook
@@ -617,8 +627,7 @@ export const LEDSceneEditor: React.FC = () => {
     handleKeyframeSelect,
     setSelectedKeyframeId,
     setSelectedBackgroundImage,
-    setShowPropertiesPanel,
-    pendingExternalCloseRef,
+    closeDrawer,
   });
 
   const selectedDevice = devices.find(
@@ -658,7 +667,8 @@ export const LEDSceneEditor: React.FC = () => {
     selectedKeyframeId,
     deleteKeyframe,
     updateKeyframe,
-    setShowPropertiesPanel,
+    closeDrawer,
+    openDrawer,
     ensureKeyframeAtCurrentFrame,
     setSelectedKeyframeId,
     currentFrameKeyframeRef,
@@ -732,14 +742,13 @@ export const LEDSceneEditor: React.FC = () => {
 
   // Device handlers
   const {
-    handleDeviceTypeChange,
     handleDeviceIpChange,
     handleDeviceConnect,
   } = useDeviceHandlers({
     currentSceneId,
     devices,
     setDevices,
-    updateDevice,
+    updateDevice: updateGlobalDevice,
     setDeviceConnectionState,
     fetchDevices,
   });
@@ -787,7 +796,26 @@ export const LEDSceneEditor: React.FC = () => {
   });
 
   return (
-    <EditorLayout fileInputRef={fileInputRef} audioInputRef={audioInputRef}>
+    <DrawerDataProvider
+      value={{
+        devices,
+        timelinePosition,
+        frameLedState,
+        onColorChange: handleColorChange,
+        onOpacityChange: handleOpacityChange,
+        onKeyframeEffectsChange: handleKeyframeEffectsChange,
+        onBackgroundImageScaleChange: handleBackgroundImageScaleChange,
+        onDeviceIpChange: handleDeviceIpChange,
+        onDeviceConnect: handleDeviceConnect,
+        onDeviceStripModeChange: handleDeviceStripModeChange,
+        onAddStrip: handleAddStrip,
+        onRemoveStrip: handleRemoveStrip,
+        onUpdateStrip: handleUpdateStrip,
+        onResetDevices: handleResetDevices,
+        onDeleteKeyframe: handleDeleteKeyframe,
+      }}
+    >
+      <EditorLayout fileInputRef={fileInputRef} audioInputRef={audioInputRef}>
       <div className="flex-1 relative">
         <SceneViewer
           canvasRef={canvasRef}
@@ -843,47 +871,6 @@ export const LEDSceneEditor: React.FC = () => {
             onToolChange={setTool}
           />
         ) : null}
-
-        <PropertiesDrawer
-          isOpen={showPropertiesPanel}
-          selectedDeviceId={selectedDeviceId}
-          selectedLEDId={selectedLEDId}
-          selectedKeyframeId={selectedKeyframeId}
-          selectedKeyframe={selectedKeyframe}
-          selectedBackgroundImage={selectedBackgroundImage}
-          selectedColor={
-            selectedLEDId
-              ? frameLedState[selectedLEDId]?.color ??
-                selectedLED?.color ??
-                "#ffffff"
-              : "#ffffff"
-          }
-          selectedOpacity={
-            selectedLEDId
-              ? frameLedState[selectedLEDId]?.opacity ??
-                selectedLED?.opacity ??
-                1
-              : 1
-          }
-          backgroundImageScale={backgroundImageScale}
-          selectedDevice={selectedDevice}
-          onClose={handlePropertiesClose}
-          protectedRefs={[canvasRef, timelineRef, sliderRef]}
-          suppressNextOutsideCloseRef={suppressNextOutsideCloseRef}
-          onAddStrip={handleAddStrip}
-          onColorChange={handleColorChange}
-          onOpacityChange={handleOpacityChange}
-          onKeyframeEffectsChange={handleKeyframeEffectsChange}
-          onBackgroundImageScaleChange={handleBackgroundImageScaleChange}
-          onDeviceTypeChange={handleDeviceTypeChange}
-          onDeviceIpChange={handleDeviceIpChange}
-          onDeviceConnect={handleDeviceConnect}
-          onDeviceStripModeChange={handleDeviceStripModeChange}
-          onRemoveStrip={handleRemoveStrip}
-          onUpdateStrip={handleUpdateStrip}
-          onResetDevices={handleResetDevices}
-          onDeleteKeyframe={handleDeleteKeyframe}
-        />
             </div>
 
       <TimelineContainer
@@ -899,7 +886,6 @@ export const LEDSceneEditor: React.FC = () => {
         isDraggingTimeline={isDraggingTimeline}
         keyframes={currentScene.keyframes}
         selectedKeyframeId={selectedKeyframeId}
-        showPropertiesPanel={showPropertiesPanel}
         hasAudio={Boolean(currentScene.audioUrl)}
         onPlayPause={handlePlayPause}
         onAddKeyframe={handleAddKeyframe}
@@ -1032,6 +1018,8 @@ export const LEDSceneEditor: React.FC = () => {
       ) : null}
 
       <NotificationContainer notifications={notifications} onDismiss={dismiss} />
+      <PropertiesDrawerOverlay />
     </EditorLayout>
+    </DrawerDataProvider>
   );
 };

@@ -121,10 +121,12 @@ class DeviceManagementService:
                     ],
                 })
 
-            # Ensure local device strips if needed
+            # Ensure local device strips if needed (identified by IP address)
+            ip_address = device_row["ip_address"]
+            is_local_device = ip_address in ("127.0.0.1", "localhost", "::1")
             if (
                 not strips_with_leds
-                and device_row["device_type"] == "local"
+                and is_local_device
                 and self.app.config.get("IS_CONTROLLER", True)
                 and (device_row["strip_mode"] or "auto").lower() == "auto"
             ):

@@ -2,6 +2,7 @@
 
 import { useRef, useCallback, useEffect } from "react";
 import type { MouseEvent as ReactMouseEvent, TouchEvent as ReactTouchEvent } from "react";
+import { useDrawer } from "../context/DrawerContext";
 import type {
   Device,
   LEDStrip,
@@ -66,7 +67,7 @@ type UseCanvasInteractionsOptions = {
   beginHistoryTransaction: () => void;
   endHistoryTransaction: () => void;
   createHistoryCheckpoint: () => void;
-  ensureKeyframeAtCurrentFrame: () => {
+  ensureKeyframeAtCurrentFrame: (options?: { openDrawer?: boolean }) => {
     keyframeId: string;
     timestamp: number;
     effects: Keyframe["effects"];
@@ -78,15 +79,10 @@ type UseCanvasInteractionsOptions = {
   setSelectedLEDId: (id: string | null) => void;
   setSelectedKeyframeId: (id: string | null) => void;
   setSelectedBackgroundImage: (selected: boolean) => void;
-  showPropertiesPanel: boolean;
-  setShowPropertiesPanel: (open: boolean) => void;
-  handlePropertiesClose: (reason?: "outside" | "explicit") => void;
   backgroundImage: string | null;
   selectedBackgroundImage: boolean;
   skipNextClickRef: React.MutableRefObject<boolean>;
   draggedDuringInteractionRef: React.MutableRefObject<boolean>;
-  suppressNextOutsideCloseRef: React.MutableRefObject<boolean>;
-  pendingExternalCloseRef: React.MutableRefObject<boolean>;
 };
 
 export const useCanvasInteractions = ({
@@ -134,16 +130,12 @@ export const useCanvasInteractions = ({
   setSelectedLEDId,
   setSelectedKeyframeId,
   setSelectedBackgroundImage,
-  showPropertiesPanel,
-  setShowPropertiesPanel,
-  handlePropertiesClose,
   backgroundImage,
   selectedBackgroundImage,
   skipNextClickRef,
   draggedDuringInteractionRef,
-  suppressNextOutsideCloseRef,
-  pendingExternalCloseRef,
 }: UseCanvasInteractionsOptions) => {
+  const { openDrawer, closeDrawer, isOpen } = useDrawer();
   const paintedLedsRef = useRef<Set<string>>(new Set());
   const paintingTransactionRef = useRef(false);
 
@@ -702,8 +694,8 @@ export const useCanvasInteractions = ({
         const shouldOpenProps = tool === "select";
         
         // Close properties panel when using move tool
-        if (tool === "move" && showPropertiesPanel) {
-          handlePropertiesClose();
+        if (tool === "move" && isOpen) {
+          closeDrawer();
         }
         
         // Check for device hit
@@ -711,21 +703,26 @@ export const useCanvasInteractions = ({
           const dist = Math.hypot(point.x - device.position.x, point.y - device.position.y);
           if (dist < 15) {
             // Toggle properties panel if clicking same device with select tool
-            if (tool === "select" && showPropertiesPanel && selectedDeviceId === device.id) {
-              handlePropertiesClose();
+            if (tool === "select" && isOpen && selectedDeviceId === device.id) {
+              closeDrawer();
               return;
             }
             
             createHistoryCheckpoint();
             setSelectedDeviceId(device.id);
             setSelectedLEDId(null);
-            suppressNextOutsideCloseRef.current = true;
-            setShowPropertiesPanel(shouldOpenProps);
-            setIsDraggingElement(true);
-            setDragStartOffset({
-              x: point.x - device.position.x,
-              y: point.y - device.position.y,
-            });
+            setSelectedBackgroundImage(false);
+            if (shouldOpenProps) {
+              openDrawer({ type: "device", deviceId: device.id });
+            }
+            // Only allow dragging with move tool
+            if (tool === "move") {
+              setIsDraggingElement(true);
+              setDragStartOffset({
+                x: point.x - device.position.x,
+                y: point.y - device.position.y,
+              });
+            }
             return;
           }
         }
@@ -737,21 +734,26 @@ export const useCanvasInteractions = ({
               const ledDist = Math.hypot(point.x - led.position.x, point.y - led.position.y);
               if (ledDist < 8) {
                 // Toggle properties panel if clicking same LED with select tool
-                if (tool === "select" && showPropertiesPanel && selectedLEDId === led.id) {
-                  handlePropertiesClose();
+                if (tool === "select" && isOpen && selectedLEDId === led.id) {
+                  closeDrawer();
                   return;
                 }
                 
                 createHistoryCheckpoint();
                 setSelectedLEDId(led.id);
                 setSelectedDeviceId(null);
-                suppressNextOutsideCloseRef.current = true;
-                setShowPropertiesPanel(shouldOpenProps);
-                setIsDraggingElement(true);
-                setDragStartOffset({
-                  x: point.x - led.position.x,
-                  y: point.y - led.position.y,
-                });
+                setSelectedBackgroundImage(false);
+                if (shouldOpenProps) {
+                  openDrawer({ type: "led", ledId: led.id });
+                }
+                // Only allow dragging with move tool
+                if (tool === "move") {
+                  setIsDraggingElement(true);
+                  setDragStartOffset({
+                    x: point.x - led.position.x,
+                    y: point.y - led.position.y,
+                  });
+                }
                 return;
               }
             }
@@ -775,8 +777,9 @@ export const useCanvasInteractions = ({
       setSelectedOpacity,
       createHistoryCheckpoint,
       beginHistoryTransaction,
-      handlePropertiesClose,
-      showPropertiesPanel,
+      openDrawer,
+      closeDrawer,
+      isOpen,
       selectedDeviceId,
       selectedLEDId,
       canvasRef,
@@ -789,7 +792,6 @@ export const useCanvasInteractions = ({
       setDragStartOffset,
       setSelectedDeviceId,
       setSelectedLEDId,
-      setShowPropertiesPanel,
     ]
   );
 
@@ -815,7 +817,7 @@ export const useCanvasInteractions = ({
           y: prev.y + dy,
         }));
         setLastPanPosition({ x: event.clientX, y: event.clientY });
-      } else if (isDraggingElement && mode === "edit") {
+      } else if (isDraggingElement && mode === "edit" && tool === "move") {
         draggedDuringInteractionRef.current = true;
         const newX = x - dragStartOffset.x;
         const newY = y - dragStartOffset.y;
@@ -1077,24 +1079,18 @@ export const useCanvasInteractions = ({
       }
 
       if (tool === "select") {
-        const suppressToggle = pendingExternalCloseRef.current;
         let clicked = false;
         devices.forEach((device) => {
           const dist = Math.hypot(x - device.position.x, y - device.position.y);
           if (dist < 15) {
-            if (
-              !suppressToggle &&
-              showPropertiesPanel &&
-              selectedDeviceId === device.id
-            ) {
-              handlePropertiesClose();
+            if (isOpen && selectedDeviceId === device.id) {
+              closeDrawer();
             } else {
               setSelectedDeviceId(device.id);
               setSelectedLEDId(null);
               setSelectedKeyframeId(null);
               setSelectedBackgroundImage(false);
-              suppressNextOutsideCloseRef.current = true;
-              setShowPropertiesPanel(true);
+              openDrawer({ type: "device", deviceId: device.id });
             }
             clicked = true;
           }
@@ -1102,19 +1098,14 @@ export const useCanvasInteractions = ({
             strip.leds.forEach((led) => {
               const ledDist = Math.hypot(x - led.position.x, y - led.position.y);
               if (ledDist < 8) {
-                if (
-                  !suppressToggle &&
-                  showPropertiesPanel &&
-                  selectedLEDId === led.id
-                ) {
-                  handlePropertiesClose();
+                if (isOpen && selectedLEDId === led.id) {
+                  closeDrawer();
                 } else {
                   setSelectedLEDId(led.id);
                   setSelectedDeviceId(null);
                   setSelectedKeyframeId(null);
                   setSelectedBackgroundImage(false);
-                  suppressNextOutsideCloseRef.current = true;
-                  setShowPropertiesPanel(true);
+                  openDrawer({ type: "led", ledId: led.id });
                 }
                 clicked = true;
               }
@@ -1125,27 +1116,21 @@ export const useCanvasInteractions = ({
         // Check if clicking on background image area (if background exists)
         if (!clicked && backgroundImage) {
           // Select background image if clicking in empty space
-          if (
-            selectedBackgroundImage &&
-            showPropertiesPanel &&
-            !suppressToggle
-          ) {
-            handlePropertiesClose();
+          if (selectedBackgroundImage && isOpen) {
+            closeDrawer();
           } else {
             setSelectedBackgroundImage(true);
             setSelectedDeviceId(null);
             setSelectedLEDId(null);
             setSelectedKeyframeId(null);
-            suppressNextOutsideCloseRef.current = true;
-            setShowPropertiesPanel(true);
+            openDrawer({ type: "background-image" });
           }
           clicked = true;
         }
         
         if (!clicked) {
-          handlePropertiesClose();
+          closeDrawer();
         }
-        pendingExternalCloseRef.current = false;
       }
     },
     [
@@ -1157,8 +1142,9 @@ export const useCanvasInteractions = ({
       selectedDeviceId,
       selectedLEDId,
       selectedBackgroundImage,
-      showPropertiesPanel,
-      handlePropertiesClose,
+      openDrawer,
+      closeDrawer,
+      isOpen,
       setSelectedDeviceId,
       setSelectedLEDId,
       setSelectedKeyframeId,

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Wifi, Cpu, Radio, Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import type { Device, Keyframe, LEDStrip } from "../../types/editor";
 
 interface PropertiesDrawerProps {
@@ -24,7 +24,6 @@ interface PropertiesDrawerProps {
     updates: { fadeIn?: number; fadeOut?: number }
   ) => void;
   onBackgroundImageScaleChange: (scale: number) => void;
-  onDeviceTypeChange: (deviceId: string, type: "local" | "wifi" | "virtual") => void;
   onDeviceIpChange: (deviceId: string, ipAddress: string) => void;
   onDeviceConnect: (deviceId: string) => void;
   onDeviceStripModeChange: (deviceId: string, mode: "auto" | "manual") => void;
@@ -53,7 +52,6 @@ export const PropertiesDrawer: React.FC<PropertiesDrawerProps> = ({
   onOpacityChange,
   onKeyframeEffectsChange,
   onBackgroundImageScaleChange,
-  onDeviceTypeChange,
   onDeviceIpChange,
   onDeviceConnect,
   onDeviceStripModeChange,
@@ -124,59 +122,13 @@ export const PropertiesDrawer: React.FC<PropertiesDrawerProps> = ({
             </button>
           </div>
           <div className="flex-1 overflow-y-auto px-6 py-4">
+            {!selectedDeviceId && !selectedLEDId && !selectedKeyframe && !selectedBackgroundImage ? (
+              <div className="text-gray-400 text-sm text-center py-8">
+                Select an element to view its properties
+              </div>
+            ) : null}
             {selectedDeviceId && selectedDevice ? (
               <div className="space-y-4">
-                <div>
-                  <label className="text-gray-400 text-sm mb-2 block">
-                    Device Type
-                  </label>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => {
-                        if (selectedDevice.type !== "local") {
-                          onDeviceTypeChange(selectedDeviceId, "local");
-                        }
-                      }}
-                      disabled={selectedDevice.type === "local"}
-                      className={`flex-1 p-2 rounded-lg border transition-all ${
-                        selectedDevice.type === "local"
-                          ? "bg-blue-500/20 border-blue-500/50 text-blue-400"
-                          : "bg-white/5 border-white/20 text-gray-400 opacity-50 cursor-not-allowed"
-                      }`}
-                      title={selectedDevice.type === "local" ? "Local (default, cannot change)" : "Local (only for first device)"}
-                    >
-                      <Cpu size={20} className="mx-auto" />
-                    </button>
-                    <button
-                      onClick={() => onDeviceTypeChange(selectedDeviceId, "wifi")}
-                      disabled={selectedDevice.type === "local"}
-                      className={`flex-1 p-2 rounded-lg border transition-all ${
-                        selectedDevice.type === "wifi"
-                          ? "bg-blue-500/20 border-blue-500/50 text-blue-400"
-                          : selectedDevice.type === "local"
-                          ? "bg-white/5 border-white/20 text-gray-400 opacity-50 cursor-not-allowed"
-                          : "bg-white/5 border-white/20 text-gray-400 hover:bg-white/10"
-                      }`}
-                      title="WiFi Device"
-                    >
-                      <Wifi size={20} className="mx-auto" />
-                    </button>
-                    <button
-                      onClick={() => onDeviceTypeChange(selectedDeviceId, "virtual")}
-                      disabled={selectedDevice.type === "local"}
-                      className={`flex-1 p-2 rounded-lg border transition-all ${
-                        selectedDevice.type === "virtual"
-                          ? "bg-blue-500/20 border-blue-500/50 text-blue-400"
-                          : selectedDevice.type === "local"
-                          ? "bg-white/5 border-white/20 text-gray-400 opacity-50 cursor-not-allowed"
-                          : "bg-white/5 border-white/20 text-gray-400 hover:bg-white/10"
-                      }`}
-                      title="Virtual Device"
-                    >
-                      <Radio size={20} className="mx-auto" />
-                    </button>
-                  </div>
-                </div>
                 <div>
                   <label className="text-gray-400 text-sm mb-2 block">
                     IP Address
@@ -184,34 +136,24 @@ export const PropertiesDrawer: React.FC<PropertiesDrawerProps> = ({
                   <div className="flex items-center gap-2">
                   <input
                     type="text"
-                    value={selectedDevice.type === "virtual" ? "N/A" : selectedDevice.ipAddress}
+                    value={selectedDevice.ipAddress}
                     onChange={(event) => {
-                      if (selectedDevice.type !== "local" && selectedDevice.type !== "virtual") {
-                        onDeviceIpChange(selectedDeviceId, event.target.value);
-                      }
+                      onDeviceIpChange(selectedDeviceId, event.target.value);
                     }}
                       onBlur={() => {
-                        if (selectedDevice.type === "wifi") {
-                          onDeviceConnect(selectedDeviceId);
-                        }
+                        onDeviceConnect(selectedDeviceId);
                       }}
                       onKeyDown={(event) => {
-                        if (event.key === "Enter" && selectedDevice.type === "wifi") {
+                        if (event.key === "Enter") {
                           event.preventDefault();
                           onDeviceConnect(selectedDeviceId);
                           (event.target as HTMLInputElement).blur();
                         }
                       }}
-                    disabled={selectedDevice.type === "local" || selectedDevice.type === "virtual"}
-                    placeholder={selectedDevice.type === "virtual" ? "N/A" : "192.168.1.100"}
-                      className={`flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/20 text-white ${
-                        selectedDevice.type === "local" || selectedDevice.type === "virtual"
-                        ? "opacity-50 cursor-not-allowed"
-                        : ""
-                    }`}
+                    placeholder="127.0.0.1, localhost, or 192.168.1.100"
+                      className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/20 text-white"
                   />
-                    {selectedDevice.type === "wifi" ? (
-                      <button
+                    <button
                         type="button"
                         onClick={() => onDeviceConnect(selectedDeviceId)}
                         disabled={selectedDevice.connectionState === "connecting"}
@@ -226,7 +168,6 @@ export const PropertiesDrawer: React.FC<PropertiesDrawerProps> = ({
                           "Connect"
                         )}
                       </button>
-                    ) : null}
                   </div>
                   {selectedDevice.connectionState === "connecting" ? (
                     <p className="text-amber-300 text-sm mt-2 flex items-center gap-2">
@@ -280,15 +221,12 @@ export const PropertiesDrawer: React.FC<PropertiesDrawerProps> = ({
                   <div className="flex gap-2 mb-4">
                     <button
                       onClick={() => onDeviceStripModeChange(selectedDeviceId, "auto")}
-                      disabled={selectedDevice.type === "virtual"}
                       className={`flex-1 p-2 rounded-lg border transition-all ${
                         selectedDevice.stripMode === "auto"
                           ? "bg-blue-500/20 border-blue-500/50 text-blue-400"
-                          : selectedDevice.type === "virtual"
-                          ? "bg-white/5 border-white/20 text-gray-400 opacity-50 cursor-not-allowed"
                           : "bg-white/5 border-white/20 text-gray-400 hover:bg-white/10"
                       }`}
-                      title={selectedDevice.type === "virtual" ? "Auto mode not available for virtual devices" : "Auto (from device env variables)"}
+                      title="Auto (from device env variables)"
                     >
                       Auto
                     </button>
@@ -476,7 +414,7 @@ export const PropertiesDrawer: React.FC<PropertiesDrawerProps> = ({
   );
 };
 
-interface StripRowProps {
+export interface StripRowProps {
   strip: LEDStrip;
   deviceId: string;
   isAuto: boolean;
@@ -484,7 +422,7 @@ interface StripRowProps {
   onRemove: () => void;
 }
 
-const StripRow: React.FC<StripRowProps> = ({
+export const StripRow: React.FC<StripRowProps> = ({
   strip,
   isAuto,
   onUpdate,
@@ -555,12 +493,12 @@ const StripRow: React.FC<StripRowProps> = ({
   );
 };
 
-interface BackgroundImageScaleInputProps {
+export interface BackgroundImageScaleInputProps {
   scale: number;
   onScaleChange: (scale: number) => void;
 }
 
-const BackgroundImageScaleInput: React.FC<BackgroundImageScaleInputProps> = ({
+export const BackgroundImageScaleInput: React.FC<BackgroundImageScaleInputProps> = ({
   scale,
   onScaleChange,
 }) => {

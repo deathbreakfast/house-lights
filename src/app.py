@@ -94,7 +94,7 @@ def create_app() -> Flask:
         os.getenv("HOUSE_LIGHTS_DEVICE_HEALTH_MAX_AGE", "45")
     )
     app.config["HEALTH_POLL_INTERVAL_SECONDS"] = float(
-        os.getenv("HOUSE_LIGHTS_HEALTH_POLL_INTERVAL", "60")
+        os.getenv("HOUSE_LIGHTS_HEALTH_POLL_INTERVAL", "120")
     )
     app.config["WS_CLIENTS"]: dict[str, dict[str, object]] = {}
     app.config["WS_CLIENT_LOCK"] = threading.Lock()

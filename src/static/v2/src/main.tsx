@@ -1,5 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
+import { DrawerProvider } from "./context/DrawerContext";
 import { LEDSceneEditor } from "./pages/LEDSceneEditor";
 
 const mount = document.getElementById("root");
@@ -11,7 +12,9 @@ if (!mount) {
 const root = createRoot(mount);
 root.render(
   <React.StrictMode>
-    <LEDSceneEditor />
+    <DrawerProvider>
+      <LEDSceneEditor />
+    </DrawerProvider>
   </React.StrictMode>
 );
 

@@ -2,14 +2,16 @@
 
 import { useCallback } from "react";
 import type { Keyframe } from "../types/editor";
+import { useDrawer } from "../context/DrawerContext";
 
 type UseKeyframeHandlersOptions = {
   currentSceneId: string;
   selectedKeyframeId: string | null;
   deleteKeyframe: (keyframeId: string) => void;
   updateKeyframe: (keyframeId: string, updater: (keyframe: Keyframe) => Keyframe) => void;
-  setShowPropertiesPanel: (open: boolean) => void;
-  ensureKeyframeAtCurrentFrame: () => {
+  closeDrawer: () => void;
+  openDrawer: (content: { type: "keyframe"; keyframeId: string }) => void;
+  ensureKeyframeAtCurrentFrame: (options?: { openDrawer?: boolean }) => {
     keyframeId: string;
     timestamp: number;
     effects: Keyframe["effects"];
@@ -26,7 +28,8 @@ export const useKeyframeHandlers = ({
   selectedKeyframeId,
   deleteKeyframe,
   updateKeyframe,
-  setShowPropertiesPanel,
+  closeDrawer,
+  openDrawer,
   ensureKeyframeAtCurrentFrame,
   setSelectedKeyframeId,
   currentFrameKeyframeRef,
@@ -38,7 +41,7 @@ export const useKeyframeHandlers = ({
     const keyframeId = selectedKeyframeId;
     deleteKeyframe(keyframeId);
     currentFrameKeyframeRef.current = null;
-    setShowPropertiesPanel(false);
+    closeDrawer();
     void fetch(`/api/v2/scenes/${currentSceneId}/keyframes/${keyframeId}`, {
       method: "DELETE",
     }).catch((error) => console.error("Error deleting keyframe:", error));
@@ -46,18 +49,17 @@ export const useKeyframeHandlers = ({
     currentSceneId,
     deleteKeyframe,
     selectedKeyframeId,
-    setShowPropertiesPanel,
+    closeDrawer,
     currentFrameKeyframeRef,
   ]);
 
   const handleAddKeyframe = useCallback(() => {
-    const { keyframeId } = ensureKeyframeAtCurrentFrame();
+    const { keyframeId } = ensureKeyframeAtCurrentFrame({ openDrawer: true });
     setSelectedKeyframeId(keyframeId);
-    setShowPropertiesPanel(true);
+    // Drawer is opened by ensureKeyframeAtCurrentFrame when openDrawer is true
   }, [
     ensureKeyframeAtCurrentFrame,
     setSelectedKeyframeId,
-    setShowPropertiesPanel,
   ]);
 
   const handleKeyframeEffectsChange = useCallback(

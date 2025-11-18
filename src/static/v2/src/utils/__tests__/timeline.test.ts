@@ -14,7 +14,7 @@ const createScene = (color = "#000000", opacity = 1): Scene => ({
       id: "device-1",
       position: { x: 0, y: 0 },
       ipAddress: "127.0.0.1",
-      type: "local",
+      type: "wifi",
       stripMode: "auto",
       strips: [
         {

@@ -23,8 +23,7 @@ type UseTimelineInteractionsOptions = {
   handleKeyframeSelect: (keyframe: Keyframe) => void;
   setSelectedKeyframeId: (id: string | null) => void;
   setSelectedBackgroundImage: (selected: boolean) => void;
-  setShowPropertiesPanel: (open: boolean) => void;
-  pendingExternalCloseRef: React.MutableRefObject<boolean>;
+  closeDrawer: () => void;
 };
 
 export const useTimelineInteractions = ({
@@ -42,8 +41,7 @@ export const useTimelineInteractions = ({
   handleKeyframeSelect,
   setSelectedKeyframeId,
   setSelectedBackgroundImage,
-  setShowPropertiesPanel,
-  pendingExternalCloseRef,
+  closeDrawer,
 }: UseTimelineInteractionsOptions) => {
   const handleTimelinePointer = useCallback(
     (clientX: number, options?: { focusKeyframe?: boolean }) => {
@@ -55,16 +53,14 @@ export const useTimelineInteractions = ({
         // This function is only called when no keyframe was found, so clear selection
         setSelectedKeyframeId(null);
         setSelectedBackgroundImage(false);
-        setShowPropertiesPanel(false);
-        pendingExternalCloseRef.current = false;
+        closeDrawer();
       }
     },
     [
       setSelectedKeyframeId,
-      setShowPropertiesPanel,
       setSelectedBackgroundImage,
       setTimelineFromPointer,
-      pendingExternalCloseRef,
+      closeDrawer,
     ]
   );
 

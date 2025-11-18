@@ -179,6 +179,7 @@ class DevicePersistenceService:
 
             target_row: sqlite3.Row | None = None
             strip_id = strip.get("id")
+            is_new_strip = False
             if isinstance(strip_id, str) and strip_id in existing_by_id:
                 target_row = existing_by_id[strip_id]
             elif gpio_pin in existing_by_pin:
@@ -186,6 +187,7 @@ class DevicePersistenceService:
                 strip_id = target_row["id"]
 
             if target_row is None:
+                is_new_strip = True
                 strip_id = strip_id or f"{device_id}-strip-{uuid4().hex[:8]}"
                 db.execute(
                     """
@@ -225,6 +227,17 @@ class DevicePersistenceService:
 
             leds_payload = strip.get("leds")
             should_refresh_leds = False
+            
+            # Check if LEDs exist for this strip
+            existing_led_count = db.execute(
+                "SELECT COUNT(*) as count FROM leds WHERE strip_id = ?",
+                (strip_id,),
+            ).fetchone()["count"]
+            
+            # Generate LEDs if:
+            # 1. LEDs are provided in payload
+            # 2. Metadata changed (pin or count changed) and we need to regenerate
+            # 3. This is a new strip with no LEDs yet
             if isinstance(leds_payload, list) and leds_payload:
                 should_refresh_leds = True
                 self._log_device_debug(
@@ -234,7 +247,7 @@ class DevicePersistenceService:
                     gpio_pin=gpio_pin,
                     led_count=led_count,
                 )
-            elif metadata_changed:
+            elif metadata_changed or (is_new_strip and existing_led_count == 0):
                 should_refresh_leds = True
                 leds_payload = self.generate_led_layout(
                     led_count=led_count,
@@ -399,14 +412,14 @@ class DevicePersistenceService:
 
         db = self._get_db()
         device_id = "device-local-default"
+        ip_address = "127.0.0.1"
         existing = db.execute(
-            "SELECT id FROM devices WHERE id = ? AND device_type = 'local'",
+            "SELECT id FROM devices WHERE id = ? AND ip_address IN ('127.0.0.1', 'localhost')",
             (device_id,),
         ).fetchone()
         if existing:
             return
 
-        ip_address = "127.0.0.1"
         strips_payload: list[dict[str, object]] = []
         for config in env_configs:
             strip_id = f"{device_id}-pin-{config.pin}"
@@ -422,7 +435,7 @@ class DevicePersistenceService:
             device_id=device_id,
             ip_address=ip_address,
             position={"x": 400, "y": 300},
-            device_type="local",
+            device_type="wifi",
             strip_mode="auto",
             strips=strips_payload,
         )

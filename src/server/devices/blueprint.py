@@ -295,6 +295,21 @@ def create_device_blueprint(app) -> Blueprint:
             except (TypeError, ValueError):
                 abort(400, description="port must be numeric when provided.")
 
+        # For localhost devices, use the Flask app port if no port is specified
+        if port_value is None and ip_address in ("127.0.0.1", "localhost", "::1"):
+            device_port_env = os.getenv("HOUSE_LIGHTS_DEVICE_PORT")
+            if device_port_env:
+                try:
+                    port_value = int(device_port_env)
+                except ValueError:
+                    pass
+            if port_value is None:
+                flask_port_env = os.getenv("FLASK_RUN_PORT", "5001")
+                try:
+                    port_value = int(flask_port_env)
+                except ValueError:
+                    port_value = 5001
+
         if base_url:
             base_url = base_url.rstrip("/")
         else:
@@ -353,7 +368,7 @@ def create_device_blueprint(app) -> Blueprint:
                 device_id=device_id,
                 ip_address=ip_address,
                 position=data.get("position"),
-                device_type=device_payload.get("deviceType", "follower"),
+                device_type="wifi",
                 strip_mode=device_payload.get("stripMode", "auto"),
                 strips=strips_payload,
             )

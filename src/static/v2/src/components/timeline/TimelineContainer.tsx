@@ -23,7 +23,6 @@ interface TimelineContainerProps {
   isDraggingTimeline: boolean;
   keyframes: Keyframe[];
   selectedKeyframeId: string | null;
-  showPropertiesPanel: boolean;
   hasAudio: boolean;
   onPlayPause: () => void;
   onAddKeyframe: () => void;
@@ -56,10 +55,9 @@ export const TimelineContainer: React.FC<TimelineContainerProps> = ({
   timelineWindowStart,
   timelineWindowWidth,
   isDraggingTimeline,
-  keyframes,
-  selectedKeyframeId,
-  showPropertiesPanel,
-  hasAudio,
+    keyframes,
+    selectedKeyframeId,
+    hasAudio,
   onPlayPause,
   onAddKeyframe,
   onExtendDuration,
@@ -191,7 +189,6 @@ export const TimelineContainer: React.FC<TimelineContainerProps> = ({
               timelinePosition={timelinePosition}
               totalDuration={totalDuration}
               selectedKeyframeId={selectedKeyframeId}
-              showPropertiesPanel={showPropertiesPanel}
               onKeyframeClick={onKeyframeSelect}
               onKeyframeDragStart={onKeyframeDragStart}
               onKeyframeDrag={onKeyframeDrag}

@@ -66,7 +66,7 @@ export const useDeviceManagement = ({
     const newDevice: Device = {
       id: `device-${Date.now()}`,
       position: { x: 400, y: 300 },
-      ipAddress: "192.168.1.100",
+      ipAddress: "",
       strips: [],
       type: "wifi",
       stripMode: "auto",
@@ -310,7 +310,7 @@ export const useDeviceManagement = ({
       position,
       ipAddress: "127.0.0.1",
       strips: [],
-      type: "local",
+      type: "wifi",
       stripMode: "auto",
       connectionState: "online",
       connectionError: null,

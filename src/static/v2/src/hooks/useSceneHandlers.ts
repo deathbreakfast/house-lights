@@ -51,7 +51,7 @@ export const useSceneHandlers = ({
       position: { x: centerX, y: centerY },
       ipAddress: "127.0.0.1",
       strips: [],
-      type: "local",
+      type: "wifi",
       stripMode: "auto",
     };
     try {
