@@ -150,6 +150,7 @@ export const useCanvasInteractions = ({
   const { openDrawer, closeDrawer, isOpen } = useDrawer();
   const paintedLedsRef = useRef<Set<string>>(new Set());
   const paintingTransactionRef = useRef(false);
+  const lastAppliedFrameRef = useRef<string>("");
 
   const getCanvasPoint = useCallback(
     (clientX: number, clientY: number): Point | null => {
@@ -417,12 +418,24 @@ export const useCanvasInteractions = ({
       await persistLedUpdates(normalized);
 
       // If in live mode and paused, immediately apply the frame to hardware
+      // Use a ref to track the last applied state to avoid duplicate applications
       if (liveMode && !isPlaying && applyKeyframe && keyframeMeta) {
-        applyKeyframe(currentSceneId, keyframeMeta.timestamp, payloadLedStates).catch(
-          (error) => {
-            console.error("Error applying frame to hardware in live mode:", error);
-          }
+        // Serialize the payload for comparison to avoid duplicate applications
+        const sortedKeys = Object.keys(payloadLedStates).sort();
+        const serializedState = JSON.stringify(
+          sortedKeys.map((key) => [key, payloadLedStates[key]])
         );
+        const serializedKey = `${currentSceneId}-${timestamp}-${serializedState}`;
+        
+        // Only apply if the state has actually changed
+        if (serializedKey !== lastAppliedFrameRef.current) {
+          lastAppliedFrameRef.current = serializedKey;
+          applyKeyframe(currentSceneId, keyframeMeta.timestamp, payloadLedStates).catch(
+            (error) => {
+              console.error("Error applying frame to hardware in live mode:", error);
+            }
+          );
+        }
       }
     },
     [
