@@ -254,20 +254,47 @@ class KeyframeService:
                 
                 # Always apply to local hardware if this is the controller (regardless of WebSocket clients)
                 if self.app.config.get("IS_CONTROLLER", False):
-                    local_device_id = device_service.local_device_id_for_scene(scene_id)
-                    local_led_states = led_states_by_device.get(local_device_id, {})
+                    # Get the controller's actual device ID (global, not scene-specific)
+                    # This matches what's used in LED IDs (from hostname or HOUSE_LIGHTS_DEVICE_ID)
+                    local_device_identity = device_service.device_identity_payload()
+                    actual_local_device_id = local_device_identity["deviceId"]  # e.g., "houselights"
+                    
+                    # Also check database for any devices with localhost IP as fallback
+                    local_device_ids = {actual_local_device_id}
+                    try:
+                        from ...database import get_db
+                        db = get_db(self.app)
+                        local_ips = ("127.0.0.1", "localhost", "::1")
+                        rows = db.execute(
+                            """
+                            SELECT id FROM devices
+                            WHERE ip_address IN (?, ?, ?)
+                            """,
+                            local_ips,
+                        ).fetchall()
+                        local_device_ids.update(row["id"] for row in rows)
+                    except Exception as exc:
+                        logger.debug("Error querying local devices: %s", exc)
+                    
+                    # Apply LED states for any local devices found
+                    local_led_states: dict[str, dict[str, object]] = {}
+                    for device_id in local_device_ids:
+                        if device_id in led_states_by_device:
+                            local_led_states.update(led_states_by_device[device_id])
+                    
                     if local_led_states:
                         from ...hardware import apply_live_frame_to_hardware
                         logger.debug(
-                            "Applying %d LEDs to local hardware (device_id=%s)",
+                            "Applying %d LEDs to local hardware (local_device_ids=%s)",
                             len(local_led_states),
-                            local_device_id,
+                            local_device_ids,
                         )
                         apply_live_frame_to_hardware(self.app, local_led_states)
                     else:
                         logger.debug(
-                            "No LED states for local device %s in this frame",
-                            local_device_id,
+                            "No LED states for local devices %s in this frame (found devices: %s)",
+                            local_device_ids,
+                            list(led_states_by_device.keys()),
                         )
             else:
                 logger.warning("DEVICE_SERVICE not available, cannot send live_frame command")
