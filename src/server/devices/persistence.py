@@ -189,20 +189,37 @@ class DevicePersistenceService:
             if target_row is None:
                 is_new_strip = True
                 strip_id = strip_id or f"{device_id}-strip-{uuid4().hex[:8]}"
+                # Use ON CONFLICT to handle race conditions where strip might already exist
                 db.execute(
                     """
                     INSERT INTO led_strips (id, device_id, gpio_pin, led_count)
                     VALUES (?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        gpio_pin = excluded.gpio_pin,
+                        led_count = excluded.led_count,
+                        updated_at = CURRENT_TIMESTAMP
                     """,
                     (strip_id, device_id, gpio_pin, led_count),
                 )
-                target_row = {
-                    "id": strip_id,
-                    "gpio_pin": gpio_pin,
-                    "led_count": led_count,
-                }
+                # Fetch the row to get the actual data (in case it was updated, not inserted)
+                target_row_result = db.execute(
+                    "SELECT id, gpio_pin, led_count FROM led_strips WHERE id = ?",
+                    (strip_id,),
+                ).fetchone()
+                if target_row_result:
+                    target_row = {
+                        "id": target_row_result["id"],
+                        "gpio_pin": target_row_result["gpio_pin"],
+                        "led_count": target_row_result["led_count"],
+                    }
+                else:
+                    target_row = {
+                        "id": strip_id,
+                        "gpio_pin": gpio_pin,
+                        "led_count": led_count,
+                    }
                 self._log_device_debug(
-                    "Created strip",
+                    "Created/updated strip",
                     device_id=device_id,
                     strip_id=strip_id,
                     gpio_pin=gpio_pin,
