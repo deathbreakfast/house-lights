@@ -122,10 +122,22 @@ class KeyframeService:
         led_states: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Apply a keyframe to the playback engine."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         playback_state = self.app.config.setdefault("PLAYBACK_STATE", {})
         scene_state = playback_state.setdefault(scene_id, {})
         
         led_states = led_states or {}
+        led_count = len(led_states)
+        
+        logger.info(
+            "Applying keyframe - scene_id=%s, timestamp=%s, led_count=%s",
+            scene_id,
+            timestamp_ms,
+            led_count,
+        )
+        
         scene_state["last_frame"] = {
             "timestamp": timestamp_ms,
             "ledStates": led_states,
@@ -136,7 +148,13 @@ class KeyframeService:
         if led_states:
             device_service = self.app.config.get("DEVICE_SERVICE")
             if device_service:
-                device_service.send_ws_command(
+                logger.debug(
+                    "Sending live_frame WebSocket command - scene_id=%s, timestamp=%s, led_count=%s",
+                    scene_id,
+                    timestamp_ms,
+                    led_count,
+                )
+                results = device_service.send_ws_command(
                     command="live_frame",
                     payload={
                         "sceneId": scene_id,
@@ -144,6 +162,11 @@ class KeyframeService:
                         "ledStates": led_states,
                     },
                 )
+                logger.info("live_frame command sent - results=%s", results)
+            else:
+                logger.warning("DEVICE_SERVICE not available, cannot send live_frame command")
+        else:
+            logger.warning("No led_states provided, skipping WebSocket command")
 
         return {"status": "queued"}
 

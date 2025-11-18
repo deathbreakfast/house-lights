@@ -131,14 +131,10 @@ def create_device_blueprint(app) -> Blueprint:
             device_id = device_row["id"]
             # Get strips for this device
             strips = repository.get_device_strips(device_id)
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.debug(f"get_all_devices: Device {device_id} has {len(strips)} strips")
             
             strips_with_leds = []
             for strip in strips:
                 leds = repository.get_strip_leds(strip["id"])
-                logger.debug(f"get_all_devices: Strip {strip['id']} has {len(leds)} LEDs")
                 
                 strips_with_leds.append({
                     "id": strip["id"],

@@ -293,11 +293,11 @@ export const LEDSceneEditor: React.FC = () => {
   // Create updateDevice function for global devices
   const updateGlobalDevice = useCallback(
     (deviceId: string, updater: (device: Device) => Device) => {
-      setDevices(
-        devices.map((device: Device) => (device.id === deviceId ? updater(device) : device))
+      setDevices((currentDevices) =>
+        currentDevices.map((device: Device) => (device.id === deviceId ? updater(device) : device))
       );
     },
-    [setDevices, devices]
+    [setDevices]
   );
 
   // Device management
@@ -849,7 +849,7 @@ export const LEDSceneEditor: React.FC = () => {
 
   return (
     <DrawerDataProvider value={drawerDataValue}>
-      <EditorLayout fileInputRef={fileInputRef} audioInputRef={audioInputRef}>
+    <EditorLayout fileInputRef={fileInputRef} audioInputRef={audioInputRef}>
       <div className="flex-1 relative">
         <SceneViewer
           canvasRef={canvasRef}

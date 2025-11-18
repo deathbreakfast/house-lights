@@ -2540,9 +2540,12 @@ def create_app() -> Flask:
         if "enabled" not in data:
             abort(400, description="enabled flag is required.")
         enabled = bool(data["enabled"])
+        LOGGER.info("Live mode toggle - enabled=%s", enabled)
         app.config["LIVE_MODE_ENABLED"] = enabled
-        _send_ws_command(command="live_mode", payload={"enabled": enabled})
+        results = _send_ws_command(command="live_mode", payload={"enabled": enabled})
+        LOGGER.info("live_mode WebSocket command sent - enabled=%s, results=%s", enabled, results)
         if not enabled and app.config["LIGHT_STATE"]["is_on"]:
+            LOGGER.info("Live mode disabled, dispatching playlists")
             _maybe_dispatch_playlists()
         return jsonify(
             {
@@ -2563,26 +2566,45 @@ def create_app() -> Flask:
         LOGGER.info("Playback started for scene %s", scene_id)
         
         is_live_mode = app.config.get("LIVE_MODE_ENABLED", False)
+        LOGGER.info("Playback start request - scene_id=%s, live_mode=%s", scene_id, is_live_mode)
         
         if is_live_mode:
             # In live mode, apply current frame and send play command
             timestamp_ms = payload.get("timestamp")
             led_states = payload.get("ledStates", {})
+            led_count = len(led_states) if led_states else 0
+            
+            LOGGER.info(
+                "Live mode playback start - scene_id=%s, timestamp=%s, led_count=%s",
+                scene_id,
+                timestamp_ms,
+                led_count,
+            )
             
             if timestamp_ms is not None and led_states:
                 from .server.keyframes.service import KeyframeService
                 keyframe_service = KeyframeService(app)
+                LOGGER.debug("Applying keyframe for live mode play - scene_id=%s, timestamp=%s", scene_id, timestamp_ms)
                 keyframe_service.apply_keyframe(
                     scene_id=scene_id,
                     timestamp_ms=int(timestamp_ms),
                     led_states=led_states,
                 )
+                LOGGER.debug("Keyframe applied successfully")
+            else:
+                LOGGER.warning(
+                    "Live mode play missing timestamp or ledStates - timestamp=%s, has_led_states=%s",
+                    timestamp_ms,
+                    bool(led_states),
+                )
             
             # Send live play command
-            _send_ws_command(
+            LOGGER.debug("Sending live_play WebSocket command - scene_id=%s, timestamp=%s", scene_id, timestamp_ms)
+            results = _send_ws_command(
                 command="live_play",
                 payload={"sceneId": scene_id, "timestamp": timestamp_ms},
             )
+            LOGGER.info("live_play command sent - results=%s", results)
         else:
             # Non-live mode: dispatch playlists
             _maybe_dispatch_playlists()
@@ -2602,26 +2624,45 @@ def create_app() -> Flask:
         LOGGER.info("Playback stopped for scene %s", scene_id)
         
         is_live_mode = app.config.get("LIVE_MODE_ENABLED", False)
+        LOGGER.info("Playback stop request - scene_id=%s, live_mode=%s", scene_id, is_live_mode)
         
         if is_live_mode:
             # In live mode, apply current frame to ensure LEDs match current frame when paused
             timestamp_ms = payload.get("timestamp")
             led_states = payload.get("ledStates", {})
+            led_count = len(led_states) if led_states else 0
+            
+            LOGGER.info(
+                "Live mode playback stop - scene_id=%s, timestamp=%s, led_count=%s",
+                scene_id,
+                timestamp_ms,
+                led_count,
+            )
             
             if timestamp_ms is not None and led_states:
                 from .server.keyframes.service import KeyframeService
                 keyframe_service = KeyframeService(app)
+                LOGGER.debug("Applying keyframe for live mode pause - scene_id=%s, timestamp=%s", scene_id, timestamp_ms)
                 keyframe_service.apply_keyframe(
                     scene_id=scene_id,
                     timestamp_ms=int(timestamp_ms),
                     led_states=led_states,
                 )
+                LOGGER.debug("Keyframe applied successfully for pause")
+            else:
+                LOGGER.warning(
+                    "Live mode pause missing timestamp or ledStates - timestamp=%s, has_led_states=%s",
+                    timestamp_ms,
+                    bool(led_states),
+                )
             
             # Send live pause command
-            _send_ws_command(
+            LOGGER.debug("Sending live_pause WebSocket command - scene_id=%s, timestamp=%s", scene_id, timestamp_ms)
+            results = _send_ws_command(
                 command="live_pause",
                 payload={"sceneId": scene_id, "timestamp": timestamp_ms},
             )
+            LOGGER.info("live_pause command sent - results=%s", results)
         else:
             # Non-live mode: send playlist pause
             _send_ws_command(command="playlist_pause", payload={"sceneId": scene_id})
