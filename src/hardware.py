@@ -461,7 +461,7 @@ class PatternPlaybackWorker:
                             strip_frame_list.append(int(pixel_value))
                         else:
                             strip_frame_list.append(default_state)
-            else:
+                    else:
                         strip_frame_list.append(default_state)
 
                 current_frame[pin] = strip_frame_list
