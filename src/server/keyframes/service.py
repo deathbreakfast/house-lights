@@ -25,28 +25,29 @@ class KeyframeService:
     def _get_device_id_for_led(self, led_id: str) -> str | None:
         """Get device_id for an LED ID, trying parse first, then database lookup."""
         # Try to parse device_id from LED ID structure
-        # LED IDs are typically: "{device_id}-{strip_id}-led-{index}" or "{device_id}-pin-{pin}-led-{index}"
-        # Strip IDs are typically: "{device_id}-pin-{pin}"
-        # So device_id is usually the prefix before the first "-pin-" or before "-led-"
+        # LED IDs are typically: "{device_id}-{strip_id}-led-{index}"
+        # Strip IDs are: "{device_id}-{pin}" (e.g., "houselights-18")
+        # So LED IDs look like: "{device_id}-{device_id}-{pin}-led-{index}" (e.g., "houselights-houselights-18-led-0")
+        # Legacy format: "{device_id}-pin-{pin}-led-{index}" (still supported for backward compatibility)
+        # So device_id is usually the prefix before the first "-pin-", or the first part for the new format
         parts = led_id.split("-")
         
         # Try to find where device_id ends
         # If we see "pin" or "led", everything before that could be the device_id
         for i, part in enumerate(parts):
             if part == "pin" and i > 0:
-                # Device ID is everything before "-pin-"
+                # Legacy format: Device ID is everything before "-pin-"
                 device_id = "-".join(parts[:i])
                 return device_id
             elif part == "led" and i > 0:
-                # Could be "{device_id}-pin-{pin}-led-{index}" or "{device_id}-{strip_id}-led-{index}"
+                # Could be "{device_id}-pin-{pin}-led-{index}" (legacy) or "{device_id}-{strip_id}-led-{index}" (new)
                 # Look back to see if we have "pin" before "led"
                 if i >= 2 and parts[i - 2] == "pin":
-                    # Format: {device_id}-pin-{pin}-led-{index}
+                    # Legacy format: {device_id}-pin-{pin}-led-{index}
                     device_id = "-".join(parts[:i - 2])
                 else:
-                    # Format: {device_id}-{strip_id}-led-{index}
-                    # Strip ID itself might contain device_id, but harder to parse
-                    # For now, try first part
+                    # New format: {device_id}-{strip_id}-led-{index} where strip_id is "{device_id}-{pin}"
+                    # For new format, device_id is the first part
                     device_id = parts[0] if parts else None
                 
                 if device_id:

@@ -365,7 +365,7 @@ class DevicePersistenceService:
                         (config.led_count, strip_id),
                     )
             else:
-                strip_id = f"{device_id}-pin-{config.pin}"
+                strip_id = f"{device_id}-{config.pin}"
                 tracked_ids.add(strip_id)
                 db.execute(
                     """
@@ -439,7 +439,7 @@ class DevicePersistenceService:
 
         strips_payload: list[dict[str, object]] = []
         for config in env_configs:
-            strip_id = f"{device_id}-pin-{config.pin}"
+            strip_id = f"{device_id}-{config.pin}"
             strips_payload.append(
                 {
                     "id": strip_id,

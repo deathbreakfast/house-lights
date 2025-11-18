@@ -262,7 +262,9 @@ class Ws2811LightController:
             LOGGER.warning("No hardware strips available")
             return
         
-        # LED IDs are typically: "{device_id}-{strip_id}-led-{index}" or "{device_id}-pin-{pin}-led-{index}"
+        # LED IDs are typically: "{device_id}-{strip_id}-led-{index}"
+        # Strip IDs are: "{device_id}-{pin}" (e.g., "houselights-18")
+        # So LED IDs look like: "{device_id}-{device_id}-{pin}-led-{index}" (e.g., "houselights-houselights-18-led-0")
         # We need to parse them to extract pin and index
         parsed_count = 0
         skipped_count = 0
@@ -271,7 +273,7 @@ class Ws2811LightController:
         for led_id, led_state in led_states.items():
             try:
                 # Parse LED ID to extract pin and index
-                # Format: "{device_id}-pin-{pin}-led-{index}" or similar
+                # Format: "{device_id}-{strip_id}-led-{index}" where strip_id is "{device_id}-{pin}"
                 parts = led_id.split("-")
                 pin: int | None = None
                 index: int | None = None
@@ -279,6 +281,7 @@ class Ws2811LightController:
                 # Look for pin and led index in the ID
                 for i, part in enumerate(parts):
                     if part == "pin" and i + 1 < len(parts):
+                        # Legacy format with "-pin-" token
                         try:
                             pin = int(parts[i + 1])
                         except (ValueError, IndexError):
@@ -286,6 +289,27 @@ class Ws2811LightController:
                     elif part == "led" and i + 1 < len(parts):
                         try:
                             index = int(parts[i + 1])
+                        except (ValueError, IndexError):
+                            pass
+                
+                # If pin not found via "pin" token, look for numeric value before "led"
+                # This handles format like "houselights-houselights-18-led-0"
+                if pin is None and index is not None:
+                    # Find where "led" appears
+                    led_pos = None
+                    for i, part in enumerate(parts):
+                        if part == "led":
+                            led_pos = i
+                            break
+                    
+                    # If we found "led", look backwards for a numeric value that could be the pin
+                    if led_pos and led_pos > 0:
+                        # Check the part immediately before "led"
+                        try:
+                            potential_pin = int(parts[led_pos - 1])
+                            # Validate it's a reasonable GPIO pin number (typically 0-40)
+                            if 0 <= potential_pin <= 40:
+                                pin = potential_pin
                         except (ValueError, IndexError):
                             pass
                 

@@ -186,7 +186,9 @@ class FollowerWebSocketClient:
                     continue
                 
                 # Check if this LED belongs to this device
-                # LED IDs are typically: "{device_id}-{strip_id}-led-{index}" or "{device_id}-pin-{pin}-led-{index}"
+                # LED IDs are typically: "{device_id}-{strip_id}-led-{index}" where strip_id is "{device_id}-{pin}"
+                # So LED IDs look like: "{device_id}-{device_id}-{pin}-led-{index}" (e.g., "houselights-houselights-18-led-0")
+                # Legacy format: "{device_id}-pin-{pin}-led-{index}" (still supported)
                 if led_id.startswith(f"{my_device_id}-"):
                     filtered_states[str(led_id)] = state
                 else:

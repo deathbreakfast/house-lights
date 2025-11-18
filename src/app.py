@@ -702,7 +702,7 @@ def create_app() -> Flask:
                         (config.led_count, strip_id),
                     )
             else:
-                strip_id = f"{device_id}-pin-{config.pin}"
+                strip_id = f"{device_id}-{config.pin}"
                 tracked_ids.add(strip_id)
                 db.execute(
                     """
