@@ -47,8 +47,26 @@ class KeyframeService:
                     device_id = "-".join(parts[:i - 2])
                 else:
                     # New format: {device_id}-{strip_id}-led-{index} where strip_id is "{device_id}-{pin}"
-                    # For new format, device_id is the first part
-                    device_id = parts[0] if parts else None
+                    # Pattern: {device_id}-{device_id}-{pin}-led-{index}
+                    # We need to detect where device_id repeats
+                    # Try to find the longest prefix that matches the beginning of the strip_id part
+                    device_id = None
+                    if i >= 3:
+                        # Look for pattern where first N parts match next N parts
+                        # For "device-1763510012464-device-1763510012464-18-led-0"
+                        # We want to detect that "device-1763510012464" appears twice
+                        for j in range(1, i - 1):
+                            # Check if parts[0:j] matches parts[j:j*2]
+                            if j * 2 <= i:
+                                potential_device_id = "-".join(parts[:j])
+                                potential_strip_start = "-".join(parts[j:j*2])
+                                if potential_strip_start == potential_device_id:
+                                    device_id = potential_device_id
+                                    break
+                    
+                    # If pattern matching failed, fall back to first part (but this may be incomplete)
+                    if not device_id:
+                        device_id = parts[0] if parts else None
                 
                 if device_id:
                     return device_id
