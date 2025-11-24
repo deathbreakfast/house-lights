@@ -2560,6 +2560,7 @@ def create_app() -> Flask:
             LOGGER.info("live_play command sent - results=%s", results)
         else:
             # Non-live mode: dispatch playlists and start playback engine
+            LOGGER.info("Non-live mode: starting playlist playback for scene %s", scene_id)
             _maybe_dispatch_playlists()
             # Start synchronized playlist playback
             playback_engine = app.config.get("PLAYLIST_PLAYBACK_ENGINE")
@@ -2571,6 +2572,9 @@ def create_app() -> Flask:
                     "Started playlist playback engine - start_time_ms=%s",
                     synchronized_start_time_ms,
                 )
+            else:
+                LOGGER.error("Playlist playback engine not initialized - cannot start playback in non-live mode")
+                synchronized_start_time_ms = int(time.time() * 1000) + 100
             # Also send playlist_play command to follower devices with synchronized start time
             _send_ws_command(
                 command="playlist_play",

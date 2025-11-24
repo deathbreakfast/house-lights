@@ -422,7 +422,7 @@ class DeviceService:
         # Get all scene playlist entries ordered by position
         playlist_entries = playlist_service.get_playlist()
         if not playlist_entries:
-            LOGGER.debug("No scene playlist entries found, skipping playlist build")
+            LOGGER.warning("No scene playlist entries found, skipping playlist build")
             return {}
         
         # Get target device IDs
@@ -514,10 +514,13 @@ class DeviceService:
             return
 
         # Build playlists from scene playlist entries first
+        LOGGER.info("Building device playlists from scene playlist entries...")
         playlist_hashes = self.build_device_playlists_from_scene_playlist(target_device_ids)
         if not playlist_hashes:
-            LOGGER.debug("No playlists built, skipping dispatch")
+            LOGGER.warning("No playlists built - check if playlist entries exist and devices are configured")
             return
+        
+        LOGGER.info("Successfully built %d playlists, dispatching to devices", len(playlist_hashes))
 
         db = get_db(self.app)
         if target_device_ids is None:
